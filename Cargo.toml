@@ -1,0 +1,32 @@
+[package]
+name = "dukascopy-fx"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jakub Kluzniak <kluzniakkuba@gmail.com>"]
+description = "A Rust library for fetching with up to minute precision historical forex data from Dukascopy."
+license = "MIT"
+repository = "https://github.com/Kluzko/dukascopy-fx"
+keywords = ["forex", "dukascopy", "tick-data", "historical-data"]
+categories = ["api-bindings", "finance"]
+
+
+[dependencies]
+tokio = { version = "1.36", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+rust_decimal = "1.32"
+byteorder = "1.4"
+lzma-rs = "0.3"
+lru = "0.13.0"
+log = { version = "0.4", optional = true }
+env_logger = { version = "0.9", optional = true }
+thiserror = "2.0.11"
+
+[features]
+default = ["logging"]
+logging = ["log", "env_logger"]
+
+
+[dev-dependencies]
+env_logger = "0.9"
