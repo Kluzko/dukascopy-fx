@@ -82,7 +82,7 @@ impl DukascopyFxService {
         }
     }
 
-    async fn get_last_tick_of_day(
+    pub async fn get_last_tick_of_day(
         pair: &CurrencyPair,
         date: DateTime<Utc>,
     ) -> Result<CurrencyExchange, DukascopyError> {
