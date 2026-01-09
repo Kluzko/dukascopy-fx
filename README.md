@@ -20,7 +20,7 @@ Dukascopy's API is free and offers high-precision tick data for a wide range of 
 ### Fetching Exchange Rates
 
 ```rust
-use dukascopy_rs::{DukascopyForexService, CurrencyPair};
+use dukascopy_rs::{DukascopyFxService, CurrencyPair};
 use chrono::{Utc, TimeZone};
 
 #[tokio::main]
@@ -38,7 +38,7 @@ async fn main() {
     let timestamp = Utc.with_ymd_and_hms(2025, 01, 03, 14, 45, 0).unwrap();
 
     // Fetch the exchange rate
-    match DukascopyForexService::get_exchange_rate(&pair, timestamp).await {
+    match DukascopyFxService::get_exchange_rate(&pair, timestamp).await {
         Ok(exchange) => {
             println!("Successfully fetched exchange rate: {:#?}", exchange);
         }
