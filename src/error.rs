@@ -1,46 +1,116 @@
+//! Error types for the Dukascopy FX library.
+
 use std::io;
 use thiserror::Error;
 use tokio::task::JoinError;
 
+/// Errors that can occur when using the Dukascopy FX library.
 #[derive(Error, Debug)]
 pub enum DukascopyError {
+    /// HTTP request failed
     #[error("HTTP error: {0}")]
     HttpError(String),
 
+    /// LZMA decompression failed
     #[error("LZMA decompression error: {0}")]
     LzmaError(String),
 
-    #[error("Invalid tick data")]
+    /// Tick data is malformed or invalid
+    #[error("Invalid tick data: data is malformed or contains invalid values")]
     InvalidTickData,
 
-    #[error("Invalid currency code")]
-    InvalidCurrencyCode,
+    /// Invalid currency code provided
+    #[error("Invalid currency code '{code}': {reason}")]
+    InvalidCurrencyCode {
+        /// The invalid currency code
+        code: String,
+        /// Reason why it's invalid
+        reason: String,
+    },
 
-    #[error("Market is closed on weekends")]
-    MarketClosed,
+    /// Attempted to access market during closed hours
+    #[error("Market is closed: {0}")]
+    MarketClosed(String),
 
-    #[error("Data not found for the specified hour")]
+    /// No data available for the requested time/pair
+    #[error("Data not found for {pair} at {timestamp}")]
+    DataNotFoundFor {
+        /// The currency pair requested
+        pair: String,
+        /// The timestamp requested
+        timestamp: String,
+    },
+
+    /// Generic data not found (for backward compatibility)
+    #[error("Data not found for the specified time")]
     DataNotFound,
 
-    #[error("Rate limit exceeded")]
+    /// API rate limit exceeded
+    #[error("Rate limit exceeded. Please wait before making more requests.")]
     RateLimitExceeded,
 
+    /// Unauthorized access (HTTP 401)
     #[error("Unauthorized access")]
     Unauthorized,
 
+    /// Forbidden access (HTTP 403)
     #[error("Access forbidden")]
     Forbidden,
 
-    #[error("Invalid request")]
-    InvalidRequest,
+    /// Invalid request (HTTP 400)
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
 
+    /// Request timeout
+    #[error("Request timed out after {0} seconds")]
+    Timeout(u64),
+
+    /// Cache error
+    #[error("Cache error: {0}")]
+    CacheError(String),
+
+    /// Unknown error with context
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
 
+impl DukascopyError {
+    /// Returns true if this error is retryable.
+    ///
+    /// Retryable errors are transient and may succeed on retry:
+    /// - Rate limiting
+    /// - Timeouts
+    /// - Some HTTP errors
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimitExceeded | Self::Timeout(_) | Self::HttpError(_)
+        )
+    }
+
+    /// Returns true if this error indicates the data doesn't exist.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::DataNotFound | Self::DataNotFoundFor { .. })
+    }
+
+    /// Returns true if this error is due to invalid input.
+    pub fn is_validation_error(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidCurrencyCode { .. } | Self::InvalidTickData | Self::InvalidRequest(_)
+        )
+    }
+}
+
 impl From<reqwest::Error> for DukascopyError {
     fn from(err: reqwest::Error) -> Self {
-        DukascopyError::HttpError(err.to_string())
+        if err.is_timeout() {
+            DukascopyError::Timeout(30)
+        } else if err.is_connect() {
+            DukascopyError::HttpError(format!("Connection failed: {}", err))
+        } else {
+            DukascopyError::HttpError(err.to_string())
+        }
     }
 }
 
@@ -52,12 +122,78 @@ impl From<lzma_rs::error::Error> for DukascopyError {
 
 impl From<io::Error> for DukascopyError {
     fn from(err: io::Error) -> Self {
-        DukascopyError::Unknown(format!("IO error: {}", err))
+        match err.kind() {
+            io::ErrorKind::TimedOut => DukascopyError::Timeout(30),
+            io::ErrorKind::NotFound => DukascopyError::DataNotFound,
+            _ => DukascopyError::Unknown(format!("IO error: {}", err)),
+        }
     }
 }
 
 impl From<JoinError> for DukascopyError {
     fn from(err: JoinError) -> Self {
-        DukascopyError::Unknown(format!("Task join error: {}", err))
+        if err.is_cancelled() {
+            DukascopyError::Unknown("Task was cancelled".to_string())
+        } else {
+            DukascopyError::Unknown(format!("Task panicked: {}", err))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_retryable() {
+        assert!(DukascopyError::RateLimitExceeded.is_retryable());
+        assert!(DukascopyError::Timeout(30).is_retryable());
+        assert!(DukascopyError::HttpError("test".into()).is_retryable());
+
+        assert!(!DukascopyError::InvalidTickData.is_retryable());
+        assert!(!DukascopyError::DataNotFound.is_retryable());
+    }
+
+    #[test]
+    fn test_is_not_found() {
+        assert!(DukascopyError::DataNotFound.is_not_found());
+        assert!(DukascopyError::DataNotFoundFor {
+            pair: "EUR/USD".into(),
+            timestamp: "2024-01-01".into()
+        }
+        .is_not_found());
+
+        assert!(!DukascopyError::InvalidTickData.is_not_found());
+    }
+
+    #[test]
+    fn test_is_validation_error() {
+        assert!(DukascopyError::InvalidTickData.is_validation_error());
+        assert!(DukascopyError::InvalidCurrencyCode {
+            code: "XX".into(),
+            reason: "too short".into()
+        }
+        .is_validation_error());
+
+        assert!(!DukascopyError::DataNotFound.is_validation_error());
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = DukascopyError::InvalidCurrencyCode {
+            code: "XX".into(),
+            reason: "must be 3 characters".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Invalid currency code 'XX': must be 3 characters"
+        );
+
+        let err = DukascopyError::DataNotFoundFor {
+            pair: "EUR/USD".into(),
+            timestamp: "2024-01-01 12:00:00".into(),
+        };
+        assert!(err.to_string().contains("EUR/USD"));
+        assert!(err.to_string().contains("2024-01-01"));
     }
 }
