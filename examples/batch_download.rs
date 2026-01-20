@@ -1,108 +1,84 @@
-//! Batch download example for dukascopy-fx
+//! Batch download example - yfinance style
 //!
-//! This example demonstrates how to efficiently download
-//! historical data for multiple pairs and time ranges.
+//! Shows how to download data for multiple currency pairs efficiently.
 
-use chrono::{Duration, NaiveDate};
-use dukascopy_fx::{CurrencyExchange, CurrencyPair, DukascopyError, DukascopyFxService};
+use dukascopy_fx::{datetime, download, download_range, Ticker};
 use std::collections::HashMap;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> dukascopy_fx::Result<()> {
     env_logger::init();
 
     println!("=== Batch Download Example ===\n");
 
-    // Define pairs to download
-    let pairs = vec![
-        CurrencyPair::eur_usd(),
-        CurrencyPair::gbp_usd(),
-        CurrencyPair::usd_jpy(),
+    // Define tickers
+    let tickers = vec![
+        Ticker::eur_usd(),
+        Ticker::gbp_usd(),
+        Ticker::usd_jpy(),
+        Ticker::usd_chf(),
+        Ticker::aud_usd(),
+        Ticker::xau_usd(),
     ];
 
-    // Define date range
-    let start_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
-    let end_date = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap();
+    // Method 1: Download with period string
+    println!("--- Download with period ---\n");
 
-    // Fetch hourly data for all pairs
-    let results = batch_download(&pairs, start_date, end_date, Duration::hours(1)).await;
+    let data = download(&tickers, "1d").await?;
 
-    // Print summary
-    println!("\n=== Download Summary ===\n");
-    for (pair, exchanges) in &results {
-        match exchanges {
-            Ok(data) => {
-                println!("{}: {} records downloaded", pair, data.len());
-                if let (Some(first), Some(last)) = (data.first(), data.last()) {
-                    println!(
-                        "  Range: {} to {}",
-                        first.timestamp.format("%Y-%m-%d %H:%M"),
-                        last.timestamp.format("%Y-%m-%d %H:%M")
-                    );
-                    println!("  First rate: {}, Last rate: {}", first.rate, last.rate);
-                }
-            }
-            Err(e) => {
-                println!("{}: Error - {}", pair, e);
-            }
-        }
-        println!();
+    for (ticker, rates) in &data {
+        println!("{}: {} records", ticker.symbol(), rates.len());
     }
 
-    // Export to CSV format (demonstration)
-    println!("=== CSV Export Example ===\n");
-    export_csv(&results);
+    // Method 2: Download with date range
+    println!("\n--- Download with date range ---\n");
+
+    let data = download_range(
+        &tickers,
+        datetime!(2025-01-02 00:00 UTC),
+        datetime!(2025-01-03 23:59 UTC),
+    )
+    .await?;
+
+    for (ticker, rates) in &data {
+        if !rates.is_empty() {
+            println!(
+                "{}: {} records ({} to {})",
+                ticker.symbol(),
+                rates.len(),
+                rates.first().unwrap().timestamp.format("%Y-%m-%d %H:%M"),
+                rates.last().unwrap().timestamp.format("%Y-%m-%d %H:%M")
+            );
+        }
+    }
+
+    // Method 3: Export to CSV
+    println!("\n--- CSV Export ---\n");
+
+    // Convert to HashMap for easier CSV export
+    let mut data_map: HashMap<String, Vec<_>> = HashMap::new();
+    for (ticker, rates) in data {
+        data_map.insert(ticker.symbol(), rates);
+    }
+
+    // Print CSV header
+    println!("pair,timestamp,rate,bid,ask,spread");
+
+    // Print first 5 rows for each pair
+    for (symbol, rates) in &data_map {
+        for rate in rates.iter().take(5) {
+            println!(
+                "{},{},{},{},{},{}",
+                symbol,
+                rate.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                rate.rate,
+                rate.bid,
+                rate.ask,
+                rate.spread()
+            );
+        }
+    }
+    println!("... (truncated)");
 
     Ok(())
-}
-
-/// Download data for multiple pairs over a date range
-async fn batch_download(
-    pairs: &[CurrencyPair],
-    start_date: NaiveDate,
-    end_date: NaiveDate,
-    interval: Duration,
-) -> HashMap<CurrencyPair, Result<Vec<CurrencyExchange>, DukascopyError>> {
-    let mut results = HashMap::new();
-
-    let start = start_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
-    let end = end_date.and_hms_opt(23, 59, 59).unwrap().and_utc();
-
-    for pair in pairs {
-        println!("Downloading {}...", pair);
-
-        let result = DukascopyFxService::get_exchange_rates_range(pair, start, end, interval).await;
-
-        match &result {
-            Ok(data) => println!("  Downloaded {} records", data.len()),
-            Err(e) => println!("  Error: {}", e),
-        }
-
-        results.insert(pair.clone(), result);
-    }
-
-    results
-}
-
-/// Export results to CSV format (prints to stdout)
-fn export_csv(results: &HashMap<CurrencyPair, Result<Vec<CurrencyExchange>, DukascopyError>>) {
-    println!("pair,timestamp,rate,bid,ask,spread,bid_volume,ask_volume");
-
-    for (pair, exchanges) in results {
-        if let Ok(data) = exchanges {
-            for ex in data {
-                println!(
-                    "{},{},{},{},{},{},{},{}",
-                    pair,
-                    ex.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                    ex.rate,
-                    ex.bid,
-                    ex.ask,
-                    ex.spread(),
-                    ex.bid_volume,
-                    ex.ask_volume
-                );
-            }
-        }
-    }
 }

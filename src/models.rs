@@ -1,7 +1,7 @@
 //! Data models for currency pairs and exchange rates.
 
+use crate::core::instrument::{resolve_instrument_config, HasInstrumentConfig, InstrumentConfig};
 use crate::error::DukascopyError;
-use crate::instrument::{resolve_instrument_config, HasInstrumentConfig, InstrumentConfig};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

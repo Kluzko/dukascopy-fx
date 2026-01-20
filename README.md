@@ -1,450 +1,299 @@
 # dukascopy-fx
 
-A Rust library for fetching **historical forex (currency exchange) data** from **Dukascopy's** tick data API. This library provides a simple and efficient way to retrieve exchange rates with minute-level precision.
+A production-ready Rust library for fetching **historical forex data** from **Dukascopy**, inspired by Python's yfinance.
 
 [![Crates.io](https://img.shields.io/crates/v/dukascopy-fx.svg)](https://crates.io/crates/dukascopy-fx)
 [![Documentation](https://docs.rs/dukascopy-fx/badge.svg)](https://docs.rs/dukascopy-fx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Why This Library?
-
-Free APIs providing historical forex data with tick-level precision are hard to find. Dukascopy's API is free and offers high-precision tick data for a wide range of currency pairs, metals, and other instruments dating back to 2003.
-
-**Key Benefits:**
-- **Free Data**: No API keys or subscriptions required
-- **High Precision**: Tick-level data with millisecond timestamps
-- **Wide Coverage**: 500+ instruments including forex, metals, indices
-- **Historical Depth**: Data available from 2003 for major pairs
-- **Automatic Scaling**: Correct price divisors for all instrument types
-
 ## Features
 
-- **Fetch Historical Forex Data**: Retrieve tick data for specific currency pairs and timestamps
-- **Automatic Instrument Detection**: Correct price scaling for JPY pairs, metals (XAU, XAG), RUB pairs, and standard forex
-- **Weekend Handling**: Automatically fetches last available tick from Friday for weekend timestamps
-- **Caching**: LRU cache reduces redundant API requests
-- **Market Hours Utilities**: Check if market is open, get next market open time
-- **Error Handling**: Detailed error types with context and retry classification
-- **Type-Safe Currency Pairs**: Parse from strings, validate codes, common pairs as constants
-- **Batch Fetching**: Fetch rates over time ranges efficiently
+- **yfinance-style API** - Familiar `Ticker` object with `history()` method
+- **Period strings** - Use `"1d"`, `"1w"`, `"1mo"`, `"1y"` for easy time ranges
+- **Built-in time utilities** - No need to add chrono separately
+- **Type-safe** - Strong types for currency pairs, rates, and errors
+- **Automatic handling** - JPY pairs, metals, weekends handled transparently
+- **Free data** - No API keys required, data from 2003+
 
 ## Installation
 
-Add this to your `Cargo.toml`:
-
 ```toml
 [dependencies]
-dukascopy-fx = "0.2.0"
+dukascopy-fx = "0.3"
 tokio = { version = "1", features = ["full"] }
-chrono = "0.4"
 ```
 
 ## Quick Start
 
 ```rust
-use dukascopy_fx::{DukascopyFxService, CurrencyPair};
-use chrono::{Utc, TimeZone};
+use dukascopy_fx::{Ticker, datetime};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a currency pair
-    let pair = CurrencyPair::new("EUR", "USD");
-    
-    // Fetch exchange rate
-    let timestamp = Utc.with_ymd_and_hms(2024, 1, 15, 14, 30, 0).unwrap();
-    let exchange = DukascopyFxService::get_exchange_rate(&pair, timestamp).await?;
-    
-    println!("Rate: {} at {}", exchange.rate, exchange.timestamp);
-    println!("Bid: {}, Ask: {}", exchange.bid, exchange.ask);
-    println!("Spread: {}", exchange.spread());
-    
+async fn main() -> dukascopy_fx::Result<()> {
+    // Create a ticker - yfinance style!
+    let ticker = Ticker::new("EUR", "USD");
+
+    // Get recent rate
+    let rate = ticker.rate().await?;
+    println!("EUR/USD: {}", rate.rate);
+
+    // Get last week of hourly data
+    let history = ticker.history("1w").await?;
+    println!("Got {} records", history.len());
+
+    // Get rate at specific time
+    let rate = ticker.rate_at(datetime!(2024-01-15 14:30 UTC)).await?;
+    println!("Rate at 2024-01-15: {}", rate.rate);
+
     Ok(())
+}
+```
+
+## Usage
+
+### Ticker API (Recommended)
+
+```rust
+use dukascopy_fx::{Ticker, datetime};
+
+// Create tickers - multiple ways
+let eur_usd = Ticker::new("EUR", "USD");
+let gold = Ticker::xau_usd();              // Convenience constructor
+let ticker: Ticker = "GBP/JPY".parse()?;   // Parse from string
+let ticker = ticker!("USD/CHF");           // Using macro
+
+// Get historical data with period strings
+let daily = ticker.history("1d").await?;    // Last 24 hours
+let weekly = ticker.history("1w").await?;   // Last 7 days
+let monthly = ticker.history("1mo").await?; // Last 30 days
+let yearly = ticker.history("1y").await?;   // Last 365 days
+
+// Custom date range
+use dukascopy_fx::time::{days_ago, weeks_ago};
+let history = ticker.history_range(weeks_ago(2), days_ago(1)).await?;
+
+// Change sampling interval (default: 1 hour)
+use dukascopy_fx::time::Duration;
+let ticker_30min = Ticker::new("EUR", "USD").interval(Duration::minutes(30));
+let history = ticker_30min.history("1d").await?; // ~48 records instead of ~24
+```
+
+### Batch Download
+
+```rust
+use dukascopy_fx::{Ticker, download};
+
+let tickers = vec![
+    Ticker::eur_usd(),
+    Ticker::gbp_usd(),
+    Ticker::usd_jpy(),
+    Ticker::xau_usd(),
+];
+
+let data = download(&tickers, "1w").await?;
+
+for (ticker, rates) in data {
+    println!("{}: {} records", ticker.symbol(), rates.len());
+}
+```
+
+### Simple Function API
+
+```rust
+use dukascopy_fx::{get_rate, get_rates_range, datetime};
+use dukascopy_fx::time::Duration;
+
+// Single rate
+let rate = get_rate("EUR", "USD", datetime!(2024-01-15 14:30 UTC)).await?;
+println!("Rate: {}, Bid: {}, Ask: {}", rate.rate, rate.bid, rate.ask);
+
+// Range of rates
+let rates = get_rates_range(
+    "EUR", "USD",
+    datetime!(2024-01-15 10:00 UTC),
+    datetime!(2024-01-15 18:00 UTC),
+    Duration::hours(1),
+).await?;
+```
+
+### Time Utilities
+
+No need to add chrono to your dependencies - we re-export everything you need:
+
+```rust
+use dukascopy_fx::time::{DateTime, Utc, Duration, now, days_ago, weeks_ago};
+use dukascopy_fx::datetime;
+
+// Convenient time helpers
+let current = now();
+let yesterday = days_ago(1);
+let last_week = weeks_ago(1);
+
+// datetime! macro - multiple formats
+let ts = datetime!(2024-01-15 14:30 UTC);      // Hour and minute
+let ts = datetime!(2024-01-15 14:30:45 UTC);   // With seconds
+let ts = datetime!(2024-01-15 UTC);             // Midnight
+```
+
+### Market Hours
+
+```rust
+use dukascopy_fx::{is_market_open, is_weekend, get_market_status, MarketStatus, datetime};
+
+let saturday = datetime!(2024-01-06 12:00 UTC);
+
+if is_weekend(saturday) {
+    println!("It's the weekend");
+}
+
+if !is_market_open(saturday) {
+    println!("Market is closed");
+}
+
+match get_market_status(saturday) {
+    MarketStatus::Open => println!("Market is open"),
+    MarketStatus::Weekend { reopens_at } => {
+        println!("Closed for weekend, reopens {}", reopens_at);
+    }
+    MarketStatus::Holiday { name, reopens_at } => {
+        println!("Holiday: {:?}, reopens {}", name, reopens_at);
+    }
+}
+```
+
+### Error Handling
+
+```rust
+use dukascopy_fx::{Ticker, DukascopyError, datetime};
+
+let ticker = Ticker::new("EUR", "USD");
+
+match ticker.rate_at(datetime!(2024-01-15 14:30 UTC)).await {
+    Ok(rate) => println!("Rate: {}", rate.rate),
+    Err(e) if e.is_retryable() => {
+        // Network error, rate limit - safe to retry
+        println!("Retryable error: {}", e);
+    }
+    Err(e) if e.is_not_found() => {
+        // No data for this timestamp (too old, future date, etc.)
+        println!("No data available: {}", e);
+    }
+    Err(e) if e.is_validation_error() => {
+        // Invalid currency code
+        println!("Invalid input: {}", e);
+    }
+    Err(e) => println!("Error: {}", e),
+}
+```
+
+### Advanced: Custom Client Configuration
+
+```rust
+use dukascopy_fx::advanced::{DukascopyClientBuilder, InstrumentConfig};
+
+let client = DukascopyClientBuilder::new()
+    .cache_size(500)           // LRU cache entries (default: 100)
+    .timeout_secs(60)          // HTTP timeout (default: 30)
+    .with_instrument_config(   // Custom instrument config
+        "BTC", "USD",
+        InstrumentConfig::new(100.0, 2),
+    )
+    .build();
+```
+
+## Good to Know
+
+### Data Availability
+
+- **Historical depth**: Major pairs available from 2003
+- **Latest data**: ~1 hour delay (data is hourly)
+- **Weekends**: No data from Friday 22:00 UTC to Sunday 22:00 UTC
+
+### Weekend Handling
+
+Request data for Saturday? The library automatically returns Friday's last available rate:
+
+```rust
+let saturday = datetime!(2024-01-06 15:00 UTC);
+let rate = ticker.rate_at(saturday).await?;
+// rate.timestamp will be Friday ~21:59 UTC, not Saturday
+```
+
+### Price Precision
+
+Different instruments have different decimal places - handled automatically:
+
+| Instrument | Example Rate | Decimals |
+|------------|--------------|----------|
+| EUR/USD | 1.08505 | 5 |
+| USD/JPY | 154.325 | 3 |
+| XAU/USD | 2645.50 | 2-3 |
+
+### Caching
+
+The library caches decompressed hourly data (LRU, 100 entries default). Requesting multiple timestamps within the same hour only fetches data once:
+
+```rust
+// These share the same cached hourly data file:
+ticker.rate_at(datetime!(2024-01-15 14:05 UTC)).await?;
+ticker.rate_at(datetime!(2024-01-15 14:30 UTC)).await?;
+ticker.rate_at(datetime!(2024-01-15 14:55 UTC)).await?;
+```
+
+### Rate Limiting
+
+Dukascopy may rate-limit aggressive requests. For bulk downloads, the library handles this gracefully, but consider adding delays for very large requests:
+
+```rust
+for ticker in tickers {
+    let data = ticker.history("1mo").await?;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 }
 ```
 
 ## Supported Instruments
 
-The library automatically detects instrument types and applies correct price scaling:
-
 | Type | Divisor | Decimals | Examples |
 |------|---------|----------|----------|
-| Standard Forex | 100,000 | 5 | EUR/USD, GBP/USD, AUD/USD, USD/PLN, EUR/CHF |
-| JPY Pairs | 1,000 | 3 | USD/JPY, EUR/JPY, GBP/JPY, AUD/JPY |
-| Metals | 1,000 | 3 | XAU/USD (Gold), XAG/USD (Silver), XAU/EUR |
+| Standard Forex | 100,000 | 5 | EUR/USD, GBP/USD, AUD/USD, USD/PLN |
+| JPY Pairs | 1,000 | 3 | USD/JPY, EUR/JPY, GBP/JPY |
+| Metals | 1,000 | 3 | XAU/USD (Gold), XAG/USD (Silver) |
 | RUB Pairs | 1,000 | 3 | USD/RUB, EUR/RUB |
 
-### Common Currency Pairs Available
-
-**Major Pairs:** EUR/USD, GBP/USD, USD/JPY, USD/CHF, AUD/USD, USD/CAD, NZD/USD
-
-**Cross Pairs:** EUR/GBP, EUR/JPY, GBP/JPY, EUR/CHF, EUR/AUD, GBP/CHF
-
-**Exotic Pairs:** USD/PLN, USD/TRY, USD/ZAR, USD/MXN, EUR/PLN, USD/RUB
-
-**Metals:** XAU/USD, XAG/USD, XAU/EUR, XAG/EUR
-
----
-
-## API Reference
-
-### CurrencyPair
-
-The `CurrencyPair` struct represents a forex pair with type-safe construction:
-
-```rust
-use dukascopy_fx::CurrencyPair;
-
-// Construction methods
-let pair = CurrencyPair::new("EUR", "USD");           // From strings (auto-uppercase)
-let pair = CurrencyPair::try_new("EUR", "USD")?;      // With validation
-let pair: CurrencyPair = "EUR/USD".parse()?;          // Parse with slash
-let pair: CurrencyPair = "EURUSD".parse()?;           // Parse without slash
-
-// Predefined pairs for convenience
-let pair = CurrencyPair::eur_usd();   // EUR/USD
-let pair = CurrencyPair::gbp_usd();   // GBP/USD
-let pair = CurrencyPair::usd_jpy();   // USD/JPY
-let pair = CurrencyPair::usd_chf();   // USD/CHF
-let pair = CurrencyPair::aud_usd();   // AUD/USD
-let pair = CurrencyPair::usd_cad();   // USD/CAD
-let pair = CurrencyPair::nzd_usd();   // NZD/USD
-let pair = CurrencyPair::xau_usd();   // Gold
-let pair = CurrencyPair::xag_usd();   // Silver
-
-// Methods
-pair.from()         // Source currency: "EUR"
-pair.to()           // Target currency: "USD"
-pair.as_symbol()    // Combined: "EURUSD"
-pair.inverse()      // Reversed: CurrencyPair { USD, EUR }
-format!("{}", pair) // Display: "EUR/USD"
-```
-
-### DukascopyFxService
-
-The main service for fetching exchange rates:
-
-```rust
-use dukascopy_fx::{DukascopyFxService, CurrencyPair};
-use chrono::{Duration, Utc, TimeZone};
-
-let pair = CurrencyPair::eur_usd();
-let timestamp = Utc.with_ymd_and_hms(2024, 1, 15, 14, 30, 0).unwrap();
-
-// Fetch single rate
-let exchange = DukascopyFxService::get_exchange_rate(&pair, timestamp).await?;
-
-// Fetch rates over a time range
-let start = Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap();
-let end = Utc.with_ymd_and_hms(2024, 1, 15, 18, 0, 0).unwrap();
-let rates = DukascopyFxService::get_exchange_rates_range(
-    &pair,
-    start,
-    end,
-    Duration::hours(1),  // Hourly intervals
-).await?;
-
-// Get last tick of a specific hour
-let exchange = DukascopyFxService::get_last_tick_of_hour(&pair, timestamp).await?;
-```
-
-### CurrencyExchange
-
-The response structure containing rate information:
-
-```rust
-pub struct CurrencyExchange {
-    pub pair: CurrencyPair,         // The currency pair
-    pub rate: Decimal,              // Mid price (average of bid/ask)
-    pub timestamp: DateTime<Utc>,   // Actual tick timestamp
-    pub ask: Decimal,               // Ask (offer) price
-    pub bid: Decimal,               // Bid price
-    pub ask_volume: f32,            // Volume at ask
-    pub bid_volume: f32,            // Volume at bid
-}
-
-// Methods
-exchange.spread()       // Calculate spread: ask - bid
-exchange.spread_pips()  // Spread in pips (instrument-aware)
-```
-
----
-
-## Market Hours
-
-The forex market operates 24/5, from Sunday evening to Friday evening UTC:
-
-| Period | Sunday Open (UTC) | Friday Close (UTC) |
-|--------|-------------------|-------------------|
-| Winter (Nov-Mar) | 22:00 | 22:00 |
-| Summer (Mar-Nov) | 21:00 | 21:00 |
-
-### Market Hours Utilities
-
-```rust
-use dukascopy_fx::{is_market_open, is_weekend, get_market_status, MarketStatus};
-use chrono::{Utc, TimeZone};
-
-let timestamp = Utc.with_ymd_and_hms(2024, 1, 6, 12, 0, 0).unwrap(); // Saturday
-
-// Simple checks
-if is_weekend(timestamp) {
-    println!("It's the weekend");
-}
-
-if !is_market_open(timestamp) {
-    println!("Market is closed");
-}
-
-// Detailed status with reopen time
-match get_market_status(timestamp) {
-    MarketStatus::Open => {
-        println!("Market is open for trading");
-    }
-    MarketStatus::Weekend { reopens_at } => {
-        println!("Market closed for weekend, reopens at {}", reopens_at);
-    }
-    MarketStatus::Holiday { name, reopens_at } => {
-        println!("Market closed for {:?}, reopens at {}", name, reopens_at);
-    }
-}
-```
-
-### Weekend Handling
-
-When you request data for a weekend timestamp, the library automatically returns the last available tick from Friday before market close:
-
-```rust
-// Request for Saturday - automatically gets Friday's last tick
-let saturday = Utc.with_ymd_and_hms(2024, 1, 6, 12, 0, 0).unwrap();
-let exchange = DukascopyFxService::get_exchange_rate(&pair, saturday).await?;
-
-// exchange.timestamp will be Friday around 21:59 UTC
-assert_eq!(exchange.timestamp.weekday(), chrono::Weekday::Fri);
-```
-
----
-
-## Error Handling
-
-The library provides detailed error types with classification methods:
-
-```rust
-use dukascopy_fx::DukascopyError;
-
-match DukascopyFxService::get_exchange_rate(&pair, timestamp).await {
-    Ok(exchange) => {
-        println!("Rate: {}", exchange.rate);
-    }
-    Err(e) => {
-        // Check error type
-        if e.is_retryable() {
-            // Rate limit, timeout, network error - safe to retry
-            println!("Retryable error: {}", e);
-        } else if e.is_not_found() {
-            // No data available for this timestamp/pair
-            println!("Data not found: {}", e);
-        } else if e.is_validation_error() {
-            // Invalid currency code or request
-            println!("Validation error: {}", e);
-        } else {
-            // Other error
-            println!("Error: {}", e);
-        }
-    }
-}
-```
-
-### Error Types
-
-| Error | Description | Retryable |
-|-------|-------------|-----------|
-| `HttpError` | Network or HTTP errors | Yes |
-| `RateLimitExceeded` | API rate limit hit | Yes |
-| `Timeout` | Request timed out | Yes |
-| `DataNotFound` | No data for timestamp/pair | No |
-| `InvalidCurrencyCode` | Invalid currency code | No |
-| `InvalidTickData` | Corrupted data | No |
-| `LzmaError` | Decompression failed | No |
-
-### Retry Pattern
-
-```rust
-async fn fetch_with_retry(
-    pair: &CurrencyPair,
-    timestamp: DateTime<Utc>,
-    max_retries: u32,
-) -> Result<CurrencyExchange, DukascopyError> {
-    for attempt in 0..max_retries {
-        match DukascopyFxService::get_exchange_rate(pair, timestamp).await {
-            Ok(exchange) => return Ok(exchange),
-            Err(e) if e.is_retryable() && attempt < max_retries - 1 => {
-                tokio::time::sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    unreachable!()
-}
-```
-
----
+**500+ instruments available** - if Dukascopy has it, this library can fetch it.
 
 ## Examples
 
-The library includes several examples in the `examples/` directory:
-
-### Basic Usage
-
 ```bash
-cargo run --example basic
+cargo run --example basic            # Basic Ticker usage
+cargo run --example advanced         # Batch downloads, market hours, error handling
+cargo run --example batch_download   # Download multiple tickers
+cargo run --example weekend_handling # Weekend data behavior
 ```
-
-Demonstrates simple rate fetching for different currency pairs.
-
-### Advanced Usage
-
-```bash
-cargo run --example advanced
-```
-
-Demonstrates:
-- Fetching multiple pairs
-- Different instrument types
-- Market hours utilities
-- Error handling patterns
-- Spread analysis
-- Time range fetching
-
-### Batch Download
-
-```bash
-cargo run --example batch_download
-```
-
-Demonstrates efficient batch downloading of historical data with CSV export.
-
----
-
-## Caching
-
-The library uses an LRU (Least Recently Used) cache to minimize API requests:
-
-- **Cache Size**: 100 entries (decompressed hourly data)
-- **Cache Key**: Full URL (includes pair, date, hour)
-- **Scope**: Process-global, shared across all calls
-
-### Cache Management
-
-```rust
-use dukascopy_fx::DukascopyClient;
-
-// Check cache size
-let size = DukascopyClient::cache_len().await?;
-println!("Cached entries: {}", size);
-
-// Clear cache (force fresh data)
-DukascopyClient::clear_cache().await?;
-```
-
----
-
-## Data Source Details
-
-### URL Format
-
-Data is fetched from Dukascopy's public tick data API:
-
-```
-https://datafeed.dukascopy.com/datafeed/{PAIR}/{YEAR}/{MONTH}/{DAY}/{HOUR}h_ticks.bi5
-```
-
-- `{PAIR}`: Combined pair symbol (e.g., "EURUSD")
-- `{YEAR}`: 4-digit year
-- `{MONTH}`: 0-indexed month (00-11)
-- `{DAY}`: Day of month (01-31)
-- `{HOUR}`: Hour (0-23)
-
-### Binary Format
-
-Files are LZMA compressed. After decompression, each tick is 20 bytes:
-
-| Bytes | Type | Description |
-|-------|------|-------------|
-| 0-3 | u32 BE | Milliseconds from hour start |
-| 4-7 | u32 BE | Ask price (raw, divide by divisor) |
-| 8-11 | u32 BE | Bid price (raw, divide by divisor) |
-| 12-15 | f32 BE | Ask volume |
-| 16-19 | f32 BE | Bid volume |
-
-### Data Availability
-
-- **Start Date**: Varies by instrument (2003 for major pairs)
-- **End Date**: Previous hour (data is hourly)
-- **Frequency**: Every price change (tick-level)
-- **Coverage**: ~500+ instruments
-
----
 
 ## Performance Tips
 
-1. **Use Caching**: The library caches decompressed data. Avoid clearing cache unnecessarily.
-
-2. **Batch Requests**: Use `get_exchange_rates_range()` for multiple timestamps in the same hour - it only fetches once.
-
-3. **Avoid Weekends**: Check `is_weekend()` before making requests if you need current data.
-
-4. **Handle Errors**: Use `is_retryable()` to implement retry logic for transient failures.
-
-5. **Reuse Pairs**: `CurrencyPair` is cheap to clone. Create once and reuse.
-
----
+1. **Use period strings** - `history("1w")` is simpler than calculating dates
+2. **Batch similar requests** - requests within same hour share cached data
+3. **Check market hours** - avoid unnecessary requests during weekends
+4. **Reuse tickers** - `Ticker` is cheap to clone
 
 ## Limitations
 
-- **Historical Only**: No real-time streaming data
-- **Hourly Granularity**: Data is organized by hour; fetching spans multiple files
-- **Rate Limits**: Dukascopy may rate-limit aggressive requests
-- **No Guarantees**: Data accuracy depends on Dukascopy's service
-- **Weekend Gaps**: No data from Friday close to Sunday open
-
----
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Run tests (`cargo test`)
-4. Run lints (`cargo clippy`)
-5. Format code (`cargo fmt`)
-6. Commit your changes
-7. Push to the branch
-8. Open a Pull Request
-
----
+- **Historical only** - no real-time streaming
+- **~1 hour delay** - data organized by completed hours
+- **Weekend gaps** - no data Friday close to Sunday open
+- **Rate limits** - Dukascopy may throttle aggressive requests
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
+MIT License - see [LICENSE](LICENSE)
 
 ## Disclaimer
 
-This library uses Dukascopy's publicly available tick data API for research and educational purposes. It is not affiliated with, endorsed by, or vetted by Dukascopy Bank SA. Use at your own risk.
-
-**Important Notes:**
-- Data is provided "as-is" without warranty
-- Not suitable for production trading without validation
-- Respect Dukascopy's terms of service
-- Consider rate limiting your requests
-
----
+This library uses Dukascopy's publicly available API for research and educational purposes. Not affiliated with Dukascopy Bank SA. Data provided "as-is" without warranty.
 
 ## Related Projects
 
-- [dukascopy-node](https://github.com/Leo4815162342/dukascopy-node) - Node.js library
-- [duka](https://github.com/giuse88/duka) - Python downloader
-- [go-duka](https://github.com/adyzng/go-duka) - Go downloader
+- [dukascopy-node](https://github.com/Leo4815162342/dukascopy-node) - Node.js
+- [duka](https://github.com/giuse88/duka) - Python

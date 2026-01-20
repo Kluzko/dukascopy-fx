@@ -1,6 +1,6 @@
 [package]
 name = "dukascopy-fx"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Jakub Kluzniak <kluzniakkuba@gmail.com>"]
 description = "A Rust library for fetching historical forex data with minute precision from Dukascopy. Supports all forex pairs, metals (XAU, XAG), and automatic price scaling."

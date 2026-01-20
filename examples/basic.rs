@@ -1,56 +1,71 @@
-use chrono::{TimeZone, Utc};
-use dukascopy_fx::{CurrencyPair, DukascopyFxService};
+//! Basic usage example for dukascopy-fx
+//!
+//! Shows the yfinance-style API for fetching forex rates.
+
+use dukascopy_fx::{datetime, Ticker};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> dukascopy_fx::Result<()> {
     env_logger::init();
 
-    // Create currency pair using constructor
-    let pair = CurrencyPair::new("USD", "PLN");
+    println!("=== dukascopy-fx Basic Example ===\n");
 
-    // Or parse from string
-    // let pair: CurrencyPair = "USD/PLN".parse().unwrap();
+    // ============================================================
+    // Method 1: Ticker API (Recommended - yfinance style)
+    // ============================================================
 
-    let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
+    println!("--- Ticker API ---\n");
 
-    match DukascopyFxService::get_exchange_rate(&pair, timestamp).await {
-        Ok(exchange) => {
-            println!("Successfully fetched exchange rate:");
-            println!("  Pair: {}", exchange.pair);
-            println!("  Rate: {}", exchange.rate);
-            println!("  Bid: {}", exchange.bid);
-            println!("  Ask: {}", exchange.ask);
-            println!("  Spread: {}", exchange.spread());
-            println!("  Timestamp: {}", exchange.timestamp);
-        }
-        Err(e) => {
-            eprintln!("Error fetching exchange rate: {}", e);
-        }
+    // Create a ticker
+    let eur_usd = Ticker::new("EUR", "USD");
+
+    // Get rate at specific time
+    let rate = eur_usd.rate_at(datetime!(2025-01-03 14:30 UTC)).await?;
+    println!("EUR/USD at 2025-01-03 14:30 UTC:");
+    println!("  Rate: {}", rate.rate);
+    println!("  Bid: {}, Ask: {}", rate.bid, rate.ask);
+    println!("  Spread: {}", rate.spread());
+
+    // Get historical data with period strings
+    println!("\nLast day of hourly data:");
+    let history = eur_usd.history("1d").await?;
+    println!("  {} records fetched", history.len());
+    if let Some(first) = history.first() {
+        println!("  First: {} @ {}", first.rate, first.timestamp);
+    }
+    if let Some(last) = history.last() {
+        println!("  Last:  {} @ {}", last.rate, last.timestamp);
     }
 
-    // Example with JPY pair (uses different price divisor)
-    let jpy_pair = CurrencyPair::usd_jpy();
-    match DukascopyFxService::get_exchange_rate(&jpy_pair, timestamp).await {
-        Ok(exchange) => {
-            println!("\nUSD/JPY exchange rate:");
-            println!("  Rate: {}", exchange.rate);
-            println!("  Bid: {}", exchange.bid);
-            println!("  Ask: {}", exchange.ask);
-        }
-        Err(e) => {
-            eprintln!("Error fetching USD/JPY rate: {}", e);
-        }
-    }
+    // ============================================================
+    // Method 2: Convenience Ticker Constructors
+    // ============================================================
 
-    // Example with Gold
-    let gold_pair = CurrencyPair::xau_usd();
-    match DukascopyFxService::get_exchange_rate(&gold_pair, timestamp).await {
-        Ok(exchange) => {
-            println!("\nXAU/USD (Gold) exchange rate:");
-            println!("  Rate: {}", exchange.rate);
-        }
-        Err(e) => {
-            eprintln!("Error fetching Gold rate: {}", e);
-        }
-    }
+    println!("\n--- Different Instruments ---\n");
+
+    // JPY pair (automatically uses correct 3 decimal precision)
+    let jpy = Ticker::usd_jpy();
+    let rate = jpy.rate_at(datetime!(2025-01-03 14:30 UTC)).await?;
+    println!("USD/JPY: {} (3 decimal places)", rate.rate);
+
+    // Gold
+    let gold = Ticker::xau_usd();
+    let rate = gold.rate_at(datetime!(2025-01-03 14:30 UTC)).await?;
+    println!("XAU/USD: {} (Gold)", rate.rate);
+
+    // Silver
+    let silver = Ticker::xag_usd();
+    let rate = silver.rate_at(datetime!(2025-01-03 14:30 UTC)).await?;
+    println!("XAG/USD: {} (Silver)", rate.rate);
+
+    // ============================================================
+    // Method 3: Simple function API
+    // ============================================================
+
+    println!("\n--- Simple Function API ---\n");
+
+    let rate = dukascopy_fx::get_rate("GBP", "USD", datetime!(2025-01-03 14:30 UTC)).await?;
+    println!("GBP/USD: {}", rate.rate);
+
+    Ok(())
 }
