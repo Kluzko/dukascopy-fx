@@ -1,23 +1,24 @@
 # dukascopy-fx
 
-A production-ready Rust library for fetching **historical forex data** from **Dukascopy**, inspired by Python's yfinance.
+A Rust library and CLI fetcher for historical Dukascopy market data.
+
+It is designed for two use-cases:
+- as a **library** for quant/research code (`Ticker`, `download`, advanced client)
+- as a **fetcher CLI** for repeatable backfill + incremental updates (`fx_fetcher`)
 
 [![Crates.io](https://img.shields.io/crates/v/dukascopy-fx.svg)](https://crates.io/crates/dukascopy-fx)
 [![Documentation](https://docs.rs/dukascopy-fx/badge.svg)](https://docs.rs/dukascopy-fx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Features
+## What You Get
 
-- **yfinance-style API** - Familiar `Ticker` object with `history()` method
-- **Period strings** - Use `"1d"`, `"1w"`, `"1mo"`, `"1y"` for easy time ranges
-- **Built-in time utilities** - No need to add chrono separately
-- **Type-safe** - Strong types for currency pairs, rates, and errors
-- **Automatic handling** - JPY pairs, metals, weekends handled transparently
-- **Incremental fetch** - Checkpoint-based updates for fetcher pipelines
-- **Instrument catalog** - Load universe from JSON (`config/universe.json`)
-- **Universe sync CLI** - Discover instruments from public Dukascopy listings and merge safely
-- **Alias + default quote support** - Resolve symbols like `AAPL -> AAPLUS`, request symbol-only rates with default quote
-- **Free data** - No API keys required, data from 2003+
+- yfinance-like `Ticker` API (`rate`, `rate_at`, `history`, `history_range`)
+- period strings (`1d`, `1w`, `1mo`, `1y`) and configurable sampling interval
+- automatic scaling for FX/JPY/metals/index-like instruments
+- retry + backoff + request limiting in the client
+- checkpoint-based incremental fetch for production pipelines
+- universe catalog with aliases (`AAPL -> AAPLUS`, `SP500 -> USA500IDX`)
+- universe sync command (`sync-universe`) from public instrument listings
 
 ## Installation
 
@@ -34,55 +35,38 @@ use dukascopy_fx::{Ticker, datetime};
 
 #[tokio::main]
 async fn main() -> dukascopy_fx::Result<()> {
-    // Create a ticker - yfinance style!
     let ticker = Ticker::new("EUR", "USD");
 
-    // Get recent rate
-    let rate = ticker.rate().await?;
-    println!("EUR/USD: {}", rate.rate);
+    let latest = ticker.rate().await?;
+    println!("latest EUR/USD: {}", latest.rate);
 
-    // Get last week of hourly data
-    let history = ticker.history("1w").await?;
-    println!("Got {} records", history.len());
+    let one_week = ticker.history("1w").await?;
+    println!("records: {}", one_week.len());
 
-    // Get rate at specific time
-    let rate = ticker.rate_at(datetime!(2024-01-15 14:30 UTC)).await?;
-    println!("Rate at 2024-01-15: {}", rate.rate);
+    let at_time = ticker.rate_at(datetime!(2024-01-15 14:30 UTC)).await?;
+    println!("at time: {}", at_time.rate);
 
     Ok(())
 }
 ```
 
-## Usage
+## Library Usage
 
-### Ticker API (Recommended)
+### 1) Ticker API (recommended)
 
 ```rust
-use dukascopy_fx::{Ticker, datetime};
-
-// Create tickers - multiple ways
-let eur_usd = Ticker::new("EUR", "USD");
-let gold = Ticker::xau_usd();              // Convenience constructor
-let ticker: Ticker = "GBP/JPY".parse()?;   // Parse from string
-let ticker = ticker!("USD/CHF");           // Using macro
-
-// Get historical data with period strings
-let daily = ticker.history("1d").await?;    // Last 24 hours
-let weekly = ticker.history("1w").await?;   // Last 7 days
-let monthly = ticker.history("1mo").await?; // Last 30 days
-let yearly = ticker.history("1y").await?;   // Last 365 days
-
-// Custom date range
-use dukascopy_fx::time::{days_ago, weeks_ago};
-let history = ticker.history_range(weeks_ago(2), days_ago(1)).await?;
-
-// Change sampling interval (default: 1 hour)
+use dukascopy_fx::{Ticker, ticker};
 use dukascopy_fx::time::Duration;
-let ticker_30min = Ticker::new("EUR", "USD").interval(Duration::minutes(30));
-let history = ticker_30min.history("1d").await?; // ~48 records instead of ~24
+
+let t1 = Ticker::new("EUR", "USD");
+let t2: Ticker = "GBP/JPY".parse()?;
+let t3 = ticker!("XAU/USD");
+
+let data = t1.history("1mo").await?;
+let data_30m = t1.interval(Duration::minutes(30)).history("1d").await?;
 ```
 
-### Batch Download
+### 2) Batch download
 
 ```rust
 use dukascopy_fx::{Ticker, download};
@@ -94,14 +78,10 @@ let tickers = vec![
     Ticker::xau_usd(),
 ];
 
-let data = download(&tickers, "1w").await?;
-
-for (ticker, rates) in data {
-    println!("{}: {} records", ticker.symbol(), rates.len());
-}
+let batch = download(&tickers, "1w").await?;
 ```
 
-### Incremental Fetching (Checkpoint-Based)
+### 3) Incremental updates with checkpoint
 
 ```rust
 use dukascopy_fx::{Ticker, FileCheckpointStore};
@@ -110,59 +90,18 @@ use dukascopy_fx::time::Duration;
 let store = FileCheckpointStore::open(".state/checkpoints.json")?;
 let ticker = Ticker::new("EUR", "USD").interval(Duration::hours(1));
 
-// First run: bootstraps from lookback window
 let rows = ticker.fetch_incremental(&store, Duration::days(7)).await?;
-println!("Fetched {} rows", rows.len());
-
-// Next runs: fetches only new data using persisted checkpoint
-let rows = ticker.fetch_incremental(&store, Duration::days(7)).await?;
-println!("Fetched {} rows", rows.len());
+println!("fetched {} rows", rows.len());
 ```
 
-### Fetcher CLI
-
-```bash
-# List active symbols from universe
-cargo run --bin fx_fetcher -- list-instruments
-
-# One-time historical backfill (bounded concurrency)
-cargo run --bin fx_fetcher -- backfill --symbols EURUSD,GBPUSD --period 30d --interval 1h --concurrency 8 --out data/fx.parquet
-
-# Incremental update with checkpoints
-cargo run --bin fx_fetcher -- update --symbols EURUSD,GBPUSD --lookback 7d --interval 1h --concurrency 8 --out data/fx.parquet
-
-# Sync universe with public Dukascopy instrument list (new symbols inactive by default)
-cargo run --bin fx_fetcher -- sync-universe --dry-run
-cargo run --bin fx_fetcher -- sync-universe --activate-new
-
-# Sync using custom source / path
-cargo run --bin fx_fetcher -- sync-universe --source https://www.dukascopy-node.app --universe config/universe.json
-
-# Convert existing CSV dump to Parquet
-cargo run --bin fx_fetcher -- export --input data/fx.csv --out data/fx.parquet
-```
-
-`--out` supports `.csv` and `.parquet`.
-For `.parquet`, output is an append-only parquet dataset directory with `part-*.parquet` files.
-
-`sync-universe` behavior:
-- reads public instrument listings (`sitemap.xml` + category pages)
-- merges discovered symbols into your existing universe file
-- keeps existing manual entries unchanged
-- adds new symbols as inactive unless `--activate-new` is used
-
-### Simple Function API
+### 4) Function API
 
 ```rust
 use dukascopy_fx::{get_rate, get_rates_range, datetime};
 use dukascopy_fx::time::Duration;
 
-// Single rate
-let rate = get_rate("EUR", "USD", datetime!(2024-01-15 14:30 UTC)).await?;
-println!("Rate: {}, Bid: {}, Ask: {}", rate.rate, rate.bid, rate.ask);
-
-// Range of rates
-let rates = get_rates_range(
+let r = get_rate("USD", "PLN", datetime!(2024-01-15 14:30 UTC)).await?;
+let rs = get_rates_range(
     "EUR", "USD",
     datetime!(2024-01-15 10:00 UTC),
     datetime!(2024-01-15 18:00 UTC),
@@ -170,176 +109,178 @@ let rates = get_rates_range(
 ).await?;
 ```
 
-### Time Utilities
+## Fetcher CLI
 
-No need to add chrono to your dependencies - we re-export everything you need:
+Binary: `fx_fetcher`
 
-```rust
-use dukascopy_fx::time::{DateTime, Utc, Duration, now, days_ago, weeks_ago};
-use dukascopy_fx::datetime;
+### Typical production flow
 
-// Convenient time helpers
-let current = now();
-let yesterday = days_ago(1);
-let last_week = weeks_ago(1);
+```bash
+# 1) refresh universe
+cargo run --bin fx_fetcher -- sync-universe --dry-run
 
-// datetime! macro - multiple formats
-let ts = datetime!(2024-01-15 14:30 UTC);      // Hour and minute
-let ts = datetime!(2024-01-15 14:30:45 UTC);   // With seconds
-let ts = datetime!(2024-01-15 UTC);             // Midnight
+# 2) initial backfill
+cargo run --bin fx_fetcher -- backfill \
+  --symbols EURUSD,GBPUSD \
+  --period 90d \
+  --interval 1h \
+  --out data/fx.parquet
+
+# 3) regular incremental update
+cargo run --bin fx_fetcher -- update \
+  --symbols EURUSD,GBPUSD \
+  --lookback 7d \
+  --interval 1h \
+  --checkpoint .state/checkpoints.json \
+  --out data/fx.parquet
 ```
 
-### Market Hours
+### Commands
 
-```rust
-use dukascopy_fx::{is_market_open, is_weekend, get_market_status, MarketStatus, datetime};
+`list-instruments`
+- Prints active instruments from universe file.
 
-let saturday = datetime!(2024-01-06 12:00 UTC);
+`backfill`
+- Downloads historical range for selected instruments.
 
-if is_weekend(saturday) {
-    println!("It's the weekend");
-}
+`update`
+- Fetches only new rows using checkpoints (+ retry buffer).
 
-if !is_market_open(saturday) {
-    println!("Market is closed");
-}
+`sync-universe`
+- Discovers symbols from public listings (`sitemap.xml` + category pages)
+- Merges into local universe
+- Keeps existing entries
+- Adds new symbols as inactive by default
 
-match get_market_status(saturday) {
-    MarketStatus::Open => println!("Market is open"),
-    MarketStatus::Weekend { reopens_at } => {
-        println!("Closed for weekend, reopens {}", reopens_at);
+`export`
+- Converts CSV dump into parquet dataset.
+
+### Important flags
+
+`backfill` / `update`
+- `--universe PATH`
+- `--symbols EURUSD,GBPUSD`
+- `--interval 1h`
+- `--checkpoint PATH`
+- `--out PATH.csv|PATH.parquet`
+- `--concurrency N`
+
+`backfill` only
+- `--period 30d`
+
+`update` only
+- `--lookback 7d`
+
+`sync-universe`
+- `--universe PATH`
+- `--source URL` (default: `https://www.dukascopy-node.app`)
+- `--dry-run`
+- `--activate-new`
+
+## Universe Catalog
+
+Universe file (`config/universe.json`) contains:
+- `instruments`: explicit symbol definitions
+- `code_aliases`: user-facing aliases to canonical codes
+
+Example:
+
+```json
+{
+  "instruments": [
+    {
+      "symbol": "EURUSD",
+      "base": "EUR",
+      "quote": "USD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
     }
-    MarketStatus::Holiday { name, reopens_at } => {
-        println!("Holiday: {:?}, reopens {}", name, reopens_at);
-    }
+  ],
+  "code_aliases": {
+    "AAPL": "AAPLUS",
+    "SP500": "USA500IDX"
+  }
 }
 ```
 
-### Error Handling
+Rules:
+- `symbol` must equal `base + quote`
+- aliases are normalized to uppercase
+- alias chains are supported (`SP500 -> US500 -> USA500IDX`)
+- alias canonical targets are validated against catalog codes
+
+## Advanced Client (aliases, default quote, custom config)
 
 ```rust
-use dukascopy_fx::{Ticker, DukascopyError, datetime};
-
-let ticker = Ticker::new("EUR", "USD");
-
-match ticker.rate_at(datetime!(2024-01-15 14:30 UTC)).await {
-    Ok(rate) => println!("Rate: {}", rate.rate),
-    Err(e) if e.is_retryable() => {
-        // Network error, rate limit - safe to retry
-        println!("Retryable error: {}", e);
-    }
-    Err(e) if e.is_not_found() => {
-        // No data for this timestamp (too old, future date, etc.)
-        println!("No data available: {}", e);
-    }
-    Err(e) if e.is_validation_error() => {
-        // Invalid currency code
-        println!("Invalid input: {}", e);
-    }
-    Err(e) => println!("Error: {}", e),
-}
-```
-
-### Advanced: Custom Client Configuration
-
-```rust
-use dukascopy_fx::advanced::{DukascopyClientBuilder, InstrumentConfig};
+use dukascopy_fx::advanced::{
+    DukascopyClientBuilder,
+    InstrumentConfig,
+    PairResolutionMode,
+};
 
 let client = DukascopyClientBuilder::new()
-    .cache_size(500)           // LRU cache entries (default: 100)
-    .timeout_secs(60)          // HTTP timeout (default: 30)
+    .cache_size(500)
+    .timeout_secs(60)
     .default_quote_currency("USD")
+    .pair_resolution_mode(PairResolutionMode::ExplicitOrDefaultQuote)
     .code_alias("AAPL", "AAPLUS")
-    .with_instrument_config(   // Custom instrument config
-        "BTC", "USD",
-        InstrumentConfig::new(100.0, 2),
-    )
+    .with_instrument_config("BTC", "USD", InstrumentConfig::new(100.0, 2))
     .build();
 ```
 
-## Good to Know
+## Market Behavior and Data Notes
 
-### Data Availability
+- Historical depth: major FX data available since 2003 (instrument-dependent)
+- Data is fetched from hourly files; latest complete data is typically delayed by ~1 hour
+- Weekend gap: no FX data from Friday close to Sunday open
+- Weekend requests are adjusted to last available trading timestamp
 
-- **Historical depth**: Major pairs available from 2003
-- **Latest data**: ~1 hour delay (data is hourly)
-- **Weekends**: No data from Friday 22:00 UTC to Sunday 22:00 UTC
+## Supported Instrument Types
 
-### Weekend Handling
+| Type | Typical Divisor | Typical Decimals | Examples |
+|------|------------------|------------------|----------|
+| Standard FX | 100,000 | 5 | EUR/USD, GBP/USD |
+| JPY pairs | 1,000 | 3 | USD/JPY, EUR/JPY |
+| Metals | 1,000 | 3 | XAU/USD, XAG/USD |
+| Index/equity-like | 1,000 (common) | 2 | USA500IDX/USD, AAPLUS/USD |
 
-Request data for Saturday? The library automatically returns Friday's last available rate:
+`sync-universe` currently discovers ~1600 instruments from public listings (as of February 22, 2026).
 
-```rust
-let saturday = datetime!(2024-01-06 15:00 UTC);
-let rate = ticker.rate_at(saturday).await?;
-// rate.timestamp will be Friday ~21:59 UTC, not Saturday
-```
+## Troubleshooting
 
-### Price Precision
+`Invalid currency code`
+- ensure codes are alphanumeric and length 2..12
+- for market symbols use canonical code or alias map
 
-Different instruments have different decimal places - handled automatically:
+`DataNotFound`
+- timestamp may be outside available history
+- market may be closed
+- instrument may not have data at requested timeframe
 
-| Instrument | Example Rate | Decimals |
-|------------|--------------|----------|
-| EUR/USD | 1.08505 | 5 |
-| USD/JPY | 154.325 | 3 |
-| XAU/USD | 2645.50 | 2-3 |
+`No conversion route`
+- set conversion mode to synthetic and configure bridge currencies in advanced client
 
-### Caching
-
-The library caches decompressed hourly data (LRU, 100 entries default). Requesting multiple timestamps within the same hour only fetches data once:
-
-```rust
-// These share the same cached hourly data file:
-ticker.rate_at(datetime!(2024-01-15 14:05 UTC)).await?;
-ticker.rate_at(datetime!(2024-01-15 14:30 UTC)).await?;
-ticker.rate_at(datetime!(2024-01-15 14:55 UTC)).await?;
-```
-
-### Rate Limiting
-
-Dukascopy may rate-limit aggressive requests. The client includes retry with exponential backoff and a global in-flight request limiter. For very large workloads, it's still a good idea to pace requests:
-
-```rust
-for ticker in tickers {
-    let data = ticker.history("1mo").await?;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-}
-```
-
-## Supported Instruments
-
-| Type | Divisor | Decimals | Examples |
-|------|---------|----------|----------|
-| Standard Forex | 100,000 | 5 | EUR/USD, GBP/USD, AUD/USD, USD/PLN |
-| JPY Pairs | 1,000 | 3 | USD/JPY, EUR/JPY, GBP/JPY |
-| Metals | 1,000 | 3 | XAU/USD (Gold), XAG/USD (Silver) |
-| RUB Pairs | 1,000 | 3 | USD/RUB, EUR/RUB |
-
-`sync-universe` currently discovers ~1600 instruments from public listings (as of February 22, 2026), while keeping your local universe curated and explicit.
+Slow backfill
+- lower `--concurrency` when remote side throttles
+- run one-time backfill, then use incremental updates
+- prefer parquet output for large datasets
 
 ## Examples
 
 ```bash
-cargo run --example basic            # Basic Ticker usage
-cargo run --example advanced         # Batch downloads, market hours, error handling
-cargo run --example batch_download   # Download multiple tickers
-cargo run --example weekend_handling # Weekend data behavior
+cargo run --example basic
+cargo run --example advanced
+cargo run --example batch_download
+cargo run --example weekend_handling
 ```
-
-## Performance Tips
-
-1. **Use period strings** - `history("1w")` is simpler than calculating dates
-2. **Batch similar requests** - requests within same hour share cached data
-3. **Check market hours** - avoid unnecessary requests during weekends
-4. **Reuse tickers** - `Ticker` is cheap to clone
 
 ## Limitations
 
-- **Historical only** - no real-time streaming
-- **~1 hour delay** - data organized by completed hours
-- **Weekend gaps** - no data Friday close to Sunday open
-- **Rate limits** - Dukascopy may throttle aggressive requests
+- historical data fetcher (no low-latency streaming feed)
+- remote throttling can occur on aggressive workloads
+- data quality/availability depends on source instrument
 
 ## License
 
@@ -347,9 +288,11 @@ MIT License - see [LICENSE](LICENSE)
 
 ## Disclaimer
 
-This library uses Dukascopy's publicly available API for research and educational purposes. Not affiliated with Dukascopy Bank SA. Data provided "as-is" without warranty.
+This project uses publicly available Dukascopy data endpoints.
+It is not affiliated with Dukascopy Bank SA.
+Data is provided as-is, without warranty.
 
 ## Related Projects
 
-- [dukascopy-node](https://github.com/Leo4815162342/dukascopy-node) - Node.js
-- [duka](https://github.com/giuse88/duka) - Python
+- [dukascopy-node](https://github.com/Leo4815162342/dukascopy-node) (Node.js)
+- [duka](https://github.com/giuse88/duka) (Python)
