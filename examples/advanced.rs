@@ -73,8 +73,8 @@ async fn example_time_utilities() -> Result<(), Box<dyn std::error::Error>> {
     println!("Last week (excluding today): {} records", history.len());
 
     // Using datetime! macro
-    let rate = ticker.rate_at(datetime!(2025-01-03 10:00 UTC)).await?;
-    println!("At 2025-01-03 10:00 UTC: {}", rate.rate);
+    let rate = ticker.rate_at(datetime!(2025-1-3 10:00 UTC)).await?;
+    println!("At 2025-1-3 10:00 UTC: {}", rate.rate);
 
     // Using period with custom interval
     let ticker_30min = Ticker::new("EUR", "USD").interval(Duration::minutes(30));
@@ -90,12 +90,12 @@ fn example_market_hours() {
     println!("--- Example 3: Market Hours ---\n");
 
     let timestamps = [
-        ("Monday 10:00", datetime!(2025-01-06 10:00 UTC)),
-        ("Friday 20:00", datetime!(2025-01-03 20:00 UTC)),
-        ("Friday 23:00", datetime!(2025-01-03 23:00 UTC)),
-        ("Saturday 12:00", datetime!(2025-01-04 12:00 UTC)),
-        ("Sunday 10:00", datetime!(2025-01-05 10:00 UTC)),
-        ("Sunday 23:00", datetime!(2025-01-05 23:00 UTC)),
+        ("Monday 10:00", datetime!(2025-1-6 10:00 UTC)),
+        ("Friday 20:00", datetime!(2025-1-3 20:00 UTC)),
+        ("Friday 23:00", datetime!(2025-1-3 23:00 UTC)),
+        ("Saturday 12:00", datetime!(2025-1-4 12:00 UTC)),
+        ("Sunday 10:00", datetime!(2025-1-5 10:00 UTC)),
+        ("Sunday 23:00", datetime!(2025-1-5 23:00 UTC)),
     ];
 
     for (name, ts) in timestamps {
@@ -105,7 +105,7 @@ fn example_market_hours() {
     }
 
     // Detailed status
-    let saturday = datetime!(2025-01-04 12:00 UTC);
+    let saturday = datetime!(2025-1-4 12:00 UTC);
     match get_market_status(saturday) {
         MarketStatus::Open => println!("\n  Saturday: Open"),
         MarketStatus::Weekend { reopens_at } => {
@@ -125,7 +125,7 @@ async fn example_error_handling() {
 
     // Future date (no data)
     let ticker = Ticker::new("EUR", "USD");
-    match ticker.rate_at(datetime!(2030-01-01 12:00 UTC)).await {
+    match ticker.rate_at(datetime!(2030-1-1 12:00 UTC)).await {
         Ok(_) => println!("  Future: Success (unexpected)"),
         Err(e) => {
             println!("  Future date error: {}", e);
@@ -158,7 +158,7 @@ async fn example_error_handling() {
     }
 
     println!("\n  Retry pattern:");
-    match fetch_with_retry(&ticker, datetime!(2025-01-03 14:00 UTC), 3).await {
+    match fetch_with_retry(&ticker, datetime!(2025-1-3 14:00 UTC), 3).await {
         Ok(rate) => println!("    Success: {}", rate.rate),
         Err(e) => println!("    Failed: {}", e),
     }

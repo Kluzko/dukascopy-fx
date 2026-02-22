@@ -1,0 +1,391 @@
+{
+  "instruments": [
+    {
+      "symbol": "EURUSD",
+      "base": "EUR",
+      "quote": "USD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "GBPUSD",
+      "base": "GBP",
+      "quote": "USD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "USDJPY",
+      "base": "USD",
+      "quote": "JPY",
+      "asset_class": "fx",
+      "price_divisor": 1000.0,
+      "decimal_places": 3,
+      "active": true
+    },
+    {
+      "symbol": "USDCHF",
+      "base": "USD",
+      "quote": "CHF",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "USDCAD",
+      "base": "USD",
+      "quote": "CAD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "AUDUSD",
+      "base": "AUD",
+      "quote": "USD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "NZDUSD",
+      "base": "NZD",
+      "quote": "USD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "EURJPY",
+      "base": "EUR",
+      "quote": "JPY",
+      "asset_class": "fx",
+      "price_divisor": 1000.0,
+      "decimal_places": 3,
+      "active": true
+    },
+    {
+      "symbol": "GBPJPY",
+      "base": "GBP",
+      "quote": "JPY",
+      "asset_class": "fx",
+      "price_divisor": 1000.0,
+      "decimal_places": 3,
+      "active": true
+    },
+    {
+      "symbol": "EURGBP",
+      "base": "EUR",
+      "quote": "GBP",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "EURCHF",
+      "base": "EUR",
+      "quote": "CHF",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "EURCAD",
+      "base": "EUR",
+      "quote": "CAD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "EURAUD",
+      "base": "EUR",
+      "quote": "AUD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "AUDJPY",
+      "base": "AUD",
+      "quote": "JPY",
+      "asset_class": "fx",
+      "price_divisor": 1000.0,
+      "decimal_places": 3,
+      "active": true
+    },
+    {
+      "symbol": "CADJPY",
+      "base": "CAD",
+      "quote": "JPY",
+      "asset_class": "fx",
+      "price_divisor": 1000.0,
+      "decimal_places": 3,
+      "active": true
+    },
+    {
+      "symbol": "CHFJPY",
+      "base": "CHF",
+      "quote": "JPY",
+      "asset_class": "fx",
+      "price_divisor": 1000.0,
+      "decimal_places": 3,
+      "active": true
+    },
+    {
+      "symbol": "GBPCHF",
+      "base": "GBP",
+      "quote": "CHF",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "GBPCAD",
+      "base": "GBP",
+      "quote": "CAD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "AUDCAD",
+      "base": "AUD",
+      "quote": "CAD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "AUDCHF",
+      "base": "AUD",
+      "quote": "CHF",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "NZDJPY",
+      "base": "NZD",
+      "quote": "JPY",
+      "asset_class": "fx",
+      "price_divisor": 1000.0,
+      "decimal_places": 3,
+      "active": true
+    },
+    {
+      "symbol": "NZDCAD",
+      "base": "NZD",
+      "quote": "CAD",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "NZDCHF",
+      "base": "NZD",
+      "quote": "CHF",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "EURPLN",
+      "base": "EUR",
+      "quote": "PLN",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "USDPLN",
+      "base": "USD",
+      "quote": "PLN",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "EURHUF",
+      "base": "EUR",
+      "quote": "HUF",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "USDMXN",
+      "base": "USD",
+      "quote": "MXN",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "USDZAR",
+      "base": "USD",
+      "quote": "ZAR",
+      "asset_class": "fx",
+      "price_divisor": 100000.0,
+      "decimal_places": 5,
+      "active": true
+    },
+    {
+      "symbol": "XAUUSD",
+      "base": "XAU",
+      "quote": "USD",
+      "asset_class": "metal",
+      "price_divisor": 1000.0,
+      "decimal_places": 3,
+      "active": true
+    },
+    {
+      "symbol": "XAGUSD",
+      "base": "XAG",
+      "quote": "USD",
+      "asset_class": "metal",
+      "price_divisor": 1000.0,
+      "decimal_places": 3,
+      "active": true
+    },
+    {
+      "symbol": "AAPLUSUSD",
+      "base": "AAPLUS",
+      "quote": "USD",
+      "asset_class": "equity",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "MSFTUSUSD",
+      "base": "MSFTUS",
+      "quote": "USD",
+      "asset_class": "equity",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "NVDAUSUSD",
+      "base": "NVDAUS",
+      "quote": "USD",
+      "asset_class": "equity",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "TSLAUSUSD",
+      "base": "TSLAUS",
+      "quote": "USD",
+      "asset_class": "equity",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "AMZNUSUSD",
+      "base": "AMZNUS",
+      "quote": "USD",
+      "asset_class": "equity",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "GOOGLUSUSD",
+      "base": "GOOGLUS",
+      "quote": "USD",
+      "asset_class": "equity",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "USA500IDXUSD",
+      "base": "USA500IDX",
+      "quote": "USD",
+      "asset_class": "index",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "DEUIDXEUR",
+      "base": "DEUIDX",
+      "quote": "EUR",
+      "asset_class": "index",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "USATECHIDXUSD",
+      "base": "USATECHIDX",
+      "quote": "USD",
+      "asset_class": "index",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "HKGIDXHKD",
+      "base": "HKGIDX",
+      "quote": "HKD",
+      "asset_class": "index",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    },
+    {
+      "symbol": "JPNIDXJPY",
+      "base": "JPNIDX",
+      "quote": "JPY",
+      "asset_class": "index",
+      "price_divisor": 1000.0,
+      "decimal_places": 2,
+      "active": true
+    }
+  ],
+  "code_aliases": {
+    "AAPL": "AAPLUS",
+    "MSFT": "MSFTUS",
+    "NVDA": "NVDAUS",
+    "TSLA": "TSLAUS",
+    "AMZN": "AMZNUS",
+    "GOOGL": "GOOGLUS",
+    "US500": "USA500IDX",
+    "SP500": "USA500IDX",
+    "SPX500": "USA500IDX",
+    "DAX": "DEUIDX",
+    "DAX40": "DEUIDX",
+    "NDX100": "USATECHIDX",
+    "NAS100": "USATECHIDX",
+    "HSI": "HKGIDX",
+    "NIKKEI": "JPNIDX",
+    "NIKKEI225": "JPNIDX"
+  }
+}

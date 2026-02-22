@@ -20,8 +20,8 @@ async fn main() -> dukascopy_fx::Result<()> {
     let eur_usd = Ticker::new("EUR", "USD");
 
     // Get rate at specific time
-    let rate = eur_usd.rate_at(datetime!(2025-01-03 14:30 UTC)).await?;
-    println!("EUR/USD at 2025-01-03 14:30 UTC:");
+    let rate = eur_usd.rate_at(datetime!(2025-1-3 14:30 UTC)).await?;
+    println!("EUR/USD at 2025-1-3 14:30 UTC:");
     println!("  Rate: {}", rate.rate);
     println!("  Bid: {}, Ask: {}", rate.bid, rate.ask);
     println!("  Spread: {}", rate.spread());
@@ -45,17 +45,17 @@ async fn main() -> dukascopy_fx::Result<()> {
 
     // JPY pair (automatically uses correct 3 decimal precision)
     let jpy = Ticker::usd_jpy();
-    let rate = jpy.rate_at(datetime!(2025-01-03 14:30 UTC)).await?;
+    let rate = jpy.rate_at(datetime!(2025-1-3 14:30 UTC)).await?;
     println!("USD/JPY: {} (3 decimal places)", rate.rate);
 
     // Gold
     let gold = Ticker::xau_usd();
-    let rate = gold.rate_at(datetime!(2025-01-03 14:30 UTC)).await?;
+    let rate = gold.rate_at(datetime!(2025-1-3 14:30 UTC)).await?;
     println!("XAU/USD: {} (Gold)", rate.rate);
 
     // Silver
     let silver = Ticker::xag_usd();
-    let rate = silver.rate_at(datetime!(2025-01-03 14:30 UTC)).await?;
+    let rate = silver.rate_at(datetime!(2025-1-3 14:30 UTC)).await?;
     println!("XAG/USD: {} (Silver)", rate.rate);
 
     // ============================================================
@@ -64,7 +64,7 @@ async fn main() -> dukascopy_fx::Result<()> {
 
     println!("\n--- Simple Function API ---\n");
 
-    let rate = dukascopy_fx::get_rate("GBP", "USD", datetime!(2025-01-03 14:30 UTC)).await?;
+    let rate = dukascopy_fx::get_rate("GBP", "USD", datetime!(2025-1-3 14:30 UTC)).await?;
     println!("GBP/USD: {}", rate.rate);
 
     Ok(())

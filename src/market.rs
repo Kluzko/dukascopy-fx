@@ -24,6 +24,38 @@ pub const MARKET_CLOSE_HOUR_SUMMER: u32 = 21;
 /// Default market close hour (using winter time as conservative default)
 pub const MARKET_CLOSE_HOUR: u32 = MARKET_CLOSE_HOUR_WINTER;
 
+fn nth_weekday_of_month(year: i32, month: u32, weekday: Weekday, nth: u32) -> NaiveDate {
+    let first_day = NaiveDate::from_ymd_opt(year, month, 1).expect("Invalid date");
+    let first_weekday = first_day.weekday().num_days_from_monday() as i64;
+    let target_weekday = weekday.num_days_from_monday() as i64;
+
+    let mut offset = target_weekday - first_weekday;
+    if offset < 0 {
+        offset += 7;
+    }
+
+    first_day + Duration::days(offset + 7 * (nth as i64 - 1))
+}
+
+fn is_us_dst(date: NaiveDate) -> bool {
+    let year = date.year();
+    let dst_start = nth_weekday_of_month(year, 3, Weekday::Sun, 2);
+    let dst_end = nth_weekday_of_month(year, 11, Weekday::Sun, 1);
+    date >= dst_start && date < dst_end
+}
+
+fn market_close_hour_for_date(date: NaiveDate) -> u32 {
+    if is_us_dst(date) {
+        MARKET_CLOSE_HOUR_SUMMER
+    } else {
+        MARKET_CLOSE_HOUR_WINTER
+    }
+}
+
+fn market_close_hour_at(timestamp: DateTime<Utc>) -> u32 {
+    market_close_hour_for_date(timestamp.date_naive())
+}
+
 /// Information about market status
 #[derive(Debug, Clone, PartialEq)]
 pub enum MarketStatus {
@@ -76,14 +108,15 @@ pub fn is_weekend(timestamp: DateTime<Utc>) -> bool {
 pub fn is_market_open(timestamp: DateTime<Utc>) -> bool {
     let weekday = timestamp.weekday();
     let hour = timestamp.hour();
+    let close_hour = market_close_hour_at(timestamp);
 
     match weekday {
         // Saturday - always closed
         Weekday::Sat => false,
         // Sunday - opens at 21:00/22:00 UTC
-        Weekday::Sun => hour >= MARKET_CLOSE_HOUR,
+        Weekday::Sun => hour >= close_hour,
         // Friday - closes at 21:00/22:00 UTC
-        Weekday::Fri => hour < MARKET_CLOSE_HOUR,
+        Weekday::Fri => hour < close_hour,
         // Monday through Thursday - always open
         _ => true,
     }
@@ -115,18 +148,20 @@ pub fn get_market_status(timestamp: DateTime<Utc>) -> MarketStatus {
 pub fn next_market_open(timestamp: DateTime<Utc>) -> DateTime<Utc> {
     let weekday = timestamp.weekday();
     let hour = timestamp.hour();
+    let close_hour = market_close_hour_at(timestamp);
 
     // Calculate days until Sunday
     let days_until_sunday = match weekday {
-        Weekday::Fri if hour >= MARKET_CLOSE_HOUR => 2, // Friday after close -> Sunday
-        Weekday::Sat => 1,                              // Saturday -> Sunday
-        Weekday::Sun if hour < MARKET_CLOSE_HOUR => 0,  // Sunday before open -> same day
-        _ => return timestamp,                          // Market is open, return current time
+        Weekday::Fri if hour >= close_hour => 2, // Friday after close -> Sunday
+        Weekday::Sat => 1,                       // Saturday -> Sunday
+        Weekday::Sun if hour < close_hour => 0,  // Sunday before open -> same day
+        _ => return timestamp,                   // Market is open, return current time
     };
 
     let open_date = timestamp.date_naive() + Duration::days(days_until_sunday);
+    let open_hour = market_close_hour_for_date(open_date);
     open_date
-        .and_hms_opt(MARKET_CLOSE_HOUR, 0, 0)
+        .and_hms_opt(open_hour, 0, 0)
         .expect("Invalid time")
         .and_utc()
 }
@@ -162,22 +197,25 @@ pub fn last_trading_day(date: NaiveDate) -> NaiveDate {
 pub fn last_available_tick_time(timestamp: DateTime<Utc>) -> DateTime<Utc> {
     let weekday = timestamp.weekday();
     let hour = timestamp.hour();
+    let close_hour = market_close_hour_at(timestamp);
 
     match weekday {
         Weekday::Sat => {
             // Saturday -> Friday at market close hour - 1 (last full hour of data)
             let friday = timestamp.date_naive() - Duration::days(1);
+            let friday_close_hour = market_close_hour_for_date(friday);
             friday
-                .and_hms_opt(MARKET_CLOSE_HOUR - 1, 59, 59)
+                .and_hms_opt(friday_close_hour - 1, 59, 59)
                 .expect("Invalid time")
                 .and_utc()
         }
         Weekday::Sun => {
-            if hour < MARKET_CLOSE_HOUR {
+            if hour < close_hour {
                 // Sunday before market opens -> Friday
                 let friday = timestamp.date_naive() - Duration::days(2);
+                let friday_close_hour = market_close_hour_for_date(friday);
                 friday
-                    .and_hms_opt(MARKET_CLOSE_HOUR - 1, 59, 59)
+                    .and_hms_opt(friday_close_hour - 1, 59, 59)
                     .expect("Invalid time")
                     .and_utc()
             } else {
@@ -185,11 +223,11 @@ pub fn last_available_tick_time(timestamp: DateTime<Utc>) -> DateTime<Utc> {
                 timestamp
             }
         }
-        Weekday::Fri if hour >= MARKET_CLOSE_HOUR => {
+        Weekday::Fri if hour >= close_hour => {
             // Friday after close -> last tick before close
             timestamp
                 .date_naive()
-                .and_hms_opt(MARKET_CLOSE_HOUR - 1, 59, 59)
+                .and_hms_opt(close_hour - 1, 59, 59)
                 .expect("Invalid time")
                 .and_utc()
         }
@@ -280,6 +318,23 @@ mod tests {
             let sun = Utc.with_ymd_and_hms(2024, 1, 7, 22, 0, 0).unwrap();
             assert!(is_market_open(sun));
         }
+
+        #[test]
+        fn test_summer_friday_after_close() {
+            // July is within US DST, close should be 21:00 UTC
+            let fri = Utc.with_ymd_and_hms(2024, 7, 5, 21, 30, 0).unwrap();
+            assert!(!is_market_open(fri));
+        }
+
+        #[test]
+        fn test_summer_sunday_open_hour() {
+            // July is within US DST, open should be 21:00 UTC
+            let before_open = Utc.with_ymd_and_hms(2024, 7, 7, 20, 0, 0).unwrap();
+            let after_open = Utc.with_ymd_and_hms(2024, 7, 7, 21, 0, 0).unwrap();
+
+            assert!(!is_market_open(before_open));
+            assert!(is_market_open(after_open));
+        }
     }
 
     mod last_trading_day {
@@ -347,6 +402,13 @@ mod tests {
             let result = last_available_tick_time(fri);
 
             assert_eq!(result.hour(), MARKET_CLOSE_HOUR - 1);
+        }
+
+        #[test]
+        fn test_summer_friday_after_close() {
+            let fri = Utc.with_ymd_and_hms(2024, 7, 5, 22, 0, 0).unwrap();
+            let result = last_available_tick_time(fri);
+            assert_eq!(result.hour(), MARKET_CLOSE_HOUR_SUMMER - 1);
         }
     }
 

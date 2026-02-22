@@ -13,6 +13,10 @@ A production-ready Rust library for fetching **historical forex data** from **Du
 - **Built-in time utilities** - No need to add chrono separately
 - **Type-safe** - Strong types for currency pairs, rates, and errors
 - **Automatic handling** - JPY pairs, metals, weekends handled transparently
+- **Incremental fetch** - Checkpoint-based updates for fetcher pipelines
+- **Instrument catalog** - Load universe from JSON (`config/universe.json`)
+- **Universe sync CLI** - Discover instruments from public Dukascopy listings and merge safely
+- **Alias + default quote support** - Resolve symbols like `AAPL -> AAPLUS`, request symbol-only rates with default quote
 - **Free data** - No API keys required, data from 2003+
 
 ## Installation
@@ -96,6 +100,56 @@ for (ticker, rates) in data {
     println!("{}: {} records", ticker.symbol(), rates.len());
 }
 ```
+
+### Incremental Fetching (Checkpoint-Based)
+
+```rust
+use dukascopy_fx::{Ticker, FileCheckpointStore};
+use dukascopy_fx::time::Duration;
+
+let store = FileCheckpointStore::open(".state/checkpoints.json")?;
+let ticker = Ticker::new("EUR", "USD").interval(Duration::hours(1));
+
+// First run: bootstraps from lookback window
+let rows = ticker.fetch_incremental(&store, Duration::days(7)).await?;
+println!("Fetched {} rows", rows.len());
+
+// Next runs: fetches only new data using persisted checkpoint
+let rows = ticker.fetch_incremental(&store, Duration::days(7)).await?;
+println!("Fetched {} rows", rows.len());
+```
+
+### Fetcher CLI
+
+```bash
+# List active symbols from universe
+cargo run --bin fx_fetcher -- list-instruments
+
+# One-time historical backfill (bounded concurrency)
+cargo run --bin fx_fetcher -- backfill --symbols EURUSD,GBPUSD --period 30d --interval 1h --concurrency 8 --out data/fx.parquet
+
+# Incremental update with checkpoints
+cargo run --bin fx_fetcher -- update --symbols EURUSD,GBPUSD --lookback 7d --interval 1h --concurrency 8 --out data/fx.parquet
+
+# Sync universe with public Dukascopy instrument list (new symbols inactive by default)
+cargo run --bin fx_fetcher -- sync-universe --dry-run
+cargo run --bin fx_fetcher -- sync-universe --activate-new
+
+# Sync using custom source / path
+cargo run --bin fx_fetcher -- sync-universe --source https://www.dukascopy-node.app --universe config/universe.json
+
+# Convert existing CSV dump to Parquet
+cargo run --bin fx_fetcher -- export --input data/fx.csv --out data/fx.parquet
+```
+
+`--out` supports `.csv` and `.parquet`.
+For `.parquet`, output is an append-only parquet dataset directory with `part-*.parquet` files.
+
+`sync-universe` behavior:
+- reads public instrument listings (`sitemap.xml` + category pages)
+- merges discovered symbols into your existing universe file
+- keeps existing manual entries unchanged
+- adds new symbols as inactive unless `--activate-new` is used
 
 ### Simple Function API
 
@@ -194,6 +248,8 @@ use dukascopy_fx::advanced::{DukascopyClientBuilder, InstrumentConfig};
 let client = DukascopyClientBuilder::new()
     .cache_size(500)           // LRU cache entries (default: 100)
     .timeout_secs(60)          // HTTP timeout (default: 30)
+    .default_quote_currency("USD")
+    .code_alias("AAPL", "AAPLUS")
     .with_instrument_config(   // Custom instrument config
         "BTC", "USD",
         InstrumentConfig::new(100.0, 2),
@@ -242,7 +298,7 @@ ticker.rate_at(datetime!(2024-01-15 14:55 UTC)).await?;
 
 ### Rate Limiting
 
-Dukascopy may rate-limit aggressive requests. For bulk downloads, the library handles this gracefully, but consider adding delays for very large requests:
+Dukascopy may rate-limit aggressive requests. The client includes retry with exponential backoff and a global in-flight request limiter. For very large workloads, it's still a good idea to pace requests:
 
 ```rust
 for ticker in tickers {
@@ -260,7 +316,7 @@ for ticker in tickers {
 | Metals | 1,000 | 3 | XAU/USD (Gold), XAG/USD (Silver) |
 | RUB Pairs | 1,000 | 3 | USD/RUB, EUR/RUB |
 
-**500+ instruments available** - if Dukascopy has it, this library can fetch it.
+`sync-universe` currently discovers ~1600 instruments from public listings (as of February 22, 2026), while keeping your local universe curated and explicit.
 
 ## Examples
 

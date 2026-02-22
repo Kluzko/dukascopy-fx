@@ -8,6 +8,9 @@ use std::io::Cursor;
 /// Size of a single tick record in bytes
 pub const TICK_SIZE_BYTES: usize = 20;
 
+/// Number of milliseconds in one hour
+pub const MILLIS_PER_HOUR: u32 = 3_600_000;
+
 /// Parsed tick data from Dukascopy binary format
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParsedTick {
@@ -75,7 +78,8 @@ impl DukascopyParser {
         let ask = ask_raw as f64 / config.price_divisor;
         let bid = bid_raw as f64 / config.price_divisor;
 
-        if ask <= 0.0 || bid <= 0.0 || ask_volume < 0.0 || bid_volume < 0.0 {
+        if ms >= MILLIS_PER_HOUR || ask <= 0.0 || bid <= 0.0 || ask_volume < 0.0 || bid_volume < 0.0
+        {
             return Err(DukascopyError::InvalidTickData);
         }
 
@@ -147,6 +151,14 @@ mod tests {
 
         assert!((tick.ask - 150.250).abs() < 0.001);
         assert!((tick.bid - 150.240).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_tick_invalid_ms_range() {
+        let data = create_tick_data(MILLIS_PER_HOUR, 110500, 110490, 1.5, 2.0);
+        assert!(
+            DukascopyParser::parse_tick_with_config(&data, InstrumentConfig::STANDARD).is_err()
+        );
     }
 
     #[test]

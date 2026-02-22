@@ -16,19 +16,19 @@ async fn main() -> dukascopy_fx::Result<()> {
 
     // Timestamps around the weekend
     let timestamps = [
-        ("Friday 20:00 UTC", datetime!(2025-01-03 20:00 UTC)),
-        ("Friday 21:30 UTC", datetime!(2025-01-03 21:30 UTC)),
+        ("Friday 20:00 UTC", datetime!(2025-1-3 20:00 UTC)),
+        ("Friday 21:30 UTC", datetime!(2025-1-3 21:30 UTC)),
         (
             "Friday 22:30 UTC (after close)",
-            datetime!(2025-01-03 22:30 UTC),
+            datetime!(2025-1-3 22:30 UTC),
         ),
-        ("Saturday 12:00 UTC", datetime!(2025-01-04 12:00 UTC)),
-        ("Sunday 10:00 UTC", datetime!(2025-01-05 10:00 UTC)),
+        ("Saturday 12:00 UTC", datetime!(2025-1-4 12:00 UTC)),
+        ("Sunday 10:00 UTC", datetime!(2025-1-5 10:00 UTC)),
         (
             "Sunday 22:30 UTC (after open)",
-            datetime!(2025-01-05 22:30 UTC),
+            datetime!(2025-1-5 22:30 UTC),
         ),
-        ("Monday 10:00 UTC", datetime!(2025-01-06 10:00 UTC)),
+        ("Monday 10:00 UTC", datetime!(2025-1-6 10:00 UTC)),
     ];
 
     // Market status analysis

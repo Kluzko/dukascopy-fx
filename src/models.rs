@@ -52,8 +52,8 @@ impl CurrencyPair {
     /// Creates a currency pair with validation.
     ///
     /// # Arguments
-    /// * `from` - Source currency code (must be 3 characters)
-    /// * `to` - Target currency code (must be 3 characters)
+    /// * `from` - Source instrument code
+    /// * `to` - Target instrument code
     ///
     /// # Returns
     /// `Ok(CurrencyPair)` if valid, `Err(InvalidCurrencyCode)` otherwise
@@ -65,7 +65,7 @@ impl CurrencyPair {
     /// let valid = CurrencyPair::try_new("USD", "EUR");
     /// assert!(valid.is_ok());
     ///
-    /// let invalid = CurrencyPair::try_new("US", "EUR");
+    /// let invalid = CurrencyPair::try_new("U", "EUR");
     /// assert!(invalid.is_err());
     /// ```
     pub fn try_new(from: impl Into<String>, to: impl Into<String>) -> Result<Self, DukascopyError> {
@@ -81,18 +81,18 @@ impl CurrencyPair {
         })
     }
 
-    /// Validates a currency code.
+    /// Validates an instrument code.
     fn validate_currency_code(code: &str) -> Result<(), DukascopyError> {
-        if code.len() != 3 {
+        if code.len() < 2 || code.len() > 12 {
             return Err(DukascopyError::InvalidCurrencyCode {
                 code: code.to_string(),
-                reason: "Currency code must be exactly 3 characters".to_string(),
+                reason: "Instrument code must be between 2 and 12 characters".to_string(),
             });
         }
-        if !code.chars().all(|c| c.is_ascii_alphabetic()) {
+        if !code.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(DukascopyError::InvalidCurrencyCode {
                 code: code.to_string(),
-                reason: "Currency code must contain only letters".to_string(),
+                reason: "Instrument code must contain only letters or digits".to_string(),
             });
         }
         Ok(())
@@ -185,7 +185,7 @@ impl FromStr for CurrencyPair {
     ///
     /// Accepts formats:
     /// - "EUR/USD" (with slash)
-    /// - "EURUSD" (6 characters, no separator)
+    /// - "EURUSD" (6 characters, no separator; forex shorthand)
     ///
     /// # Examples
     /// ```
@@ -203,7 +203,7 @@ impl FromStr for CurrencyPair {
             if parts.len() != 2 {
                 return Err(DukascopyError::InvalidCurrencyCode {
                     code: s.to_string(),
-                    reason: "Invalid pair format. Expected 'XXX/YYY'".to_string(),
+                    reason: "Invalid pair format. Expected 'BASE/QUOTE'".to_string(),
                 });
             }
             Self::try_new(parts[0].trim(), parts[1].trim())
@@ -212,7 +212,7 @@ impl FromStr for CurrencyPair {
         } else {
             Err(DukascopyError::InvalidCurrencyCode {
                 code: s.to_string(),
-                reason: "Invalid pair format. Expected 'XXX/YYY' or 'XXXYYY'".to_string(),
+                reason: "Invalid pair format. Expected 'BASE/QUOTE' or 6-char forex shorthand like 'EURUSD'".to_string(),
             })
         }
     }
@@ -291,20 +291,24 @@ mod tests {
 
         #[test]
         fn test_try_new_invalid_length() {
-            let result = CurrencyPair::try_new("EU", "USD");
+            let result = CurrencyPair::try_new("E", "USD");
             assert!(result.is_err());
 
-            let result = CurrencyPair::try_new("EURO", "USD");
+            let result = CurrencyPair::try_new("TOO_LONG_INSTRUMENT_CODE", "USD");
             assert!(result.is_err());
         }
 
         #[test]
         fn test_try_new_invalid_chars() {
-            let result = CurrencyPair::try_new("US1", "EUR");
-            assert!(result.is_err());
-
             let result = CurrencyPair::try_new("US$", "EUR");
             assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_try_new_allows_alphanumeric_instrument_codes() {
+            let pair = CurrencyPair::try_new("DE40", "USD").unwrap();
+            assert_eq!(pair.from(), "DE40");
+            assert_eq!(pair.to(), "USD");
         }
 
         #[test]
@@ -360,6 +364,13 @@ mod tests {
             assert!("EUR".parse::<CurrencyPair>().is_err());
             assert!("EUR/USD/GBP".parse::<CurrencyPair>().is_err());
             assert!("EURUSDD".parse::<CurrencyPair>().is_err());
+        }
+
+        #[test]
+        fn test_from_str_with_non_fx_codes() {
+            let pair: CurrencyPair = "DE40/USD".parse().unwrap();
+            assert_eq!(pair.from(), "DE40");
+            assert_eq!(pair.to(), "USD");
         }
 
         #[test]

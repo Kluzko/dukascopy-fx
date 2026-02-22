@@ -35,8 +35,8 @@ async fn main() -> dukascopy_fx::Result<()> {
 
     let data = download_range(
         &tickers,
-        datetime!(2025-01-02 00:00 UTC),
-        datetime!(2025-01-03 23:59 UTC),
+        datetime!(2025-1-2 00:00 UTC),
+        datetime!(2025-1-3 23:59 UTC),
     )
     .await?;
 

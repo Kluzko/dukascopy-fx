@@ -1,6 +1,5 @@
 //! Instrument configuration for price scaling and decimal precision.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Price divisor for standard currency pairs (5 decimal places)
@@ -9,7 +8,7 @@ pub const DIVISOR_5_DECIMALS: f64 = 100_000.0;
 /// Price divisor for 3 decimal place instruments (JPY, metals, RUB)
 pub const DIVISOR_3_DECIMALS: f64 = 1_000.0;
 
-/// Price divisor for 2 decimal place instruments (some indices)
+/// Price divisor for 2 decimal place instruments
 pub const DIVISOR_2_DECIMALS: f64 = 100.0;
 
 /// Configuration for an instrument's price scaling
@@ -42,8 +41,8 @@ impl InstrumentConfig {
     /// RUB pairs configuration (3 decimal places)
     pub const RUB: Self = Self::new(DIVISOR_3_DECIMALS, 3);
 
-    /// Index configuration (2 decimal places)
-    pub const INDEX: Self = Self::new(DIVISOR_2_DECIMALS, 2);
+    /// Index configuration (raw index ticks are typically scaled by 1000).
+    pub const INDEX: Self = Self::new(DIVISOR_3_DECIMALS, 2);
 }
 
 impl Default for InstrumentConfig {
@@ -65,13 +64,8 @@ pub enum CurrencyCategory {
 impl CurrencyCategory {
     /// Categorizes a currency code
     pub fn from_code(code: &str) -> Self {
-        let code_upper: Cow<str> = if code.chars().all(|c| c.is_ascii_uppercase()) {
-            Cow::Borrowed(code)
-        } else {
-            Cow::Owned(code.to_ascii_uppercase())
-        };
-
-        match code_upper.as_ref() {
+        let code_upper = normalize_code(code);
+        match code_upper.as_str() {
             "JPY" => Self::Jpy,
             "RUB" => Self::Rub,
             "XAU" | "XAG" | "XPT" | "XPD" => Self::Metal,
@@ -94,6 +88,14 @@ impl CurrencyCategory {
 
 /// Resolves the instrument configuration for a currency pair.
 pub fn resolve_instrument_config(from: &str, to: &str) -> InstrumentConfig {
+    if looks_like_index_code(from)
+        || looks_like_index_code(to)
+        || looks_like_equity_code(from)
+        || looks_like_equity_code(to)
+    {
+        return InstrumentConfig::INDEX;
+    }
+
     let from_cat = CurrencyCategory::from_code(from);
     let to_cat = CurrencyCategory::from_code(to);
 
@@ -103,6 +105,34 @@ pub fn resolve_instrument_config(from: &str, to: &str) -> InstrumentConfig {
         (CurrencyCategory::Rub, _) | (_, CurrencyCategory::Rub) => InstrumentConfig::RUB,
         _ => InstrumentConfig::STANDARD,
     }
+}
+
+#[inline]
+fn normalize_code(code: &str) -> String {
+    code.trim().to_ascii_uppercase()
+}
+
+#[inline]
+fn pair_key(from: &str, to: &str) -> String {
+    // Use an explicit separator to avoid key collisions for variable-length codes.
+    format!("{}/{}", normalize_code(from), normalize_code(to))
+}
+
+#[inline]
+fn looks_like_index_code(code: &str) -> bool {
+    let normalized = normalize_code(code);
+    normalized.contains("IDX") || normalized.chars().any(|ch| ch.is_ascii_digit())
+}
+
+#[inline]
+fn looks_like_equity_code(code: &str) -> bool {
+    let normalized = normalize_code(code);
+    // Dukascopy stock CFDs typically use symbols like AAPLUS, MSFTUS, NVDAUS.
+    normalized.len() > 3
+        && normalized.ends_with("US")
+        && normalized[..normalized.len() - 2]
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase())
 }
 
 /// Trait for types that can provide instrument configuration
@@ -147,20 +177,17 @@ impl OverrideInstrumentProvider {
     }
 
     pub fn add_override(&mut self, from: &str, to: &str, config: InstrumentConfig) -> &mut Self {
-        let key = format!("{}{}", from.to_ascii_uppercase(), to.to_ascii_uppercase());
-        self.overrides.insert(key, config);
+        self.overrides.insert(pair_key(from, to), config);
         self
     }
 
     pub fn remove_override(&mut self, from: &str, to: &str) -> &mut Self {
-        let key = format!("{}{}", from.to_ascii_uppercase(), to.to_ascii_uppercase());
-        self.overrides.remove(&key);
+        self.overrides.remove(&pair_key(from, to));
         self
     }
 
     pub fn has_override(&self, from: &str, to: &str) -> bool {
-        let key = format!("{}{}", from.to_ascii_uppercase(), to.to_ascii_uppercase());
-        self.overrides.contains_key(&key)
+        self.overrides.contains_key(&pair_key(from, to))
     }
 
     pub fn override_count(&self) -> usize {
@@ -170,9 +197,8 @@ impl OverrideInstrumentProvider {
 
 impl InstrumentProvider for OverrideInstrumentProvider {
     fn get_config(&self, from: &str, to: &str) -> InstrumentConfig {
-        let key = format!("{}{}", from.to_ascii_uppercase(), to.to_ascii_uppercase());
         self.overrides
-            .get(&key)
+            .get(&pair_key(from, to))
             .copied()
             .unwrap_or_else(|| resolve_instrument_config(from, to))
     }
@@ -215,6 +241,18 @@ mod tests {
             resolve_instrument_config("USD", "RUB"),
             InstrumentConfig::RUB
         );
+        assert_eq!(
+            resolve_instrument_config("DE40", "USD"),
+            InstrumentConfig::INDEX
+        );
+        assert_eq!(
+            resolve_instrument_config("DEUIDX", "EUR"),
+            InstrumentConfig::INDEX
+        );
+        assert_eq!(
+            resolve_instrument_config("AAPLUS", "USD"),
+            InstrumentConfig::INDEX
+        );
     }
 
     #[test]
@@ -230,9 +268,23 @@ mod tests {
     }
 
     #[test]
+    fn test_override_provider_key_collision_regression() {
+        let mut provider = OverrideInstrumentProvider::new();
+        let first = InstrumentConfig::new(10.0, 1);
+        let second = InstrumentConfig::new(20.0, 2);
+
+        provider.add_override("AB", "CDE", first);
+        provider.add_override("ABC", "DE", second);
+
+        assert_eq!(provider.get_config("AB", "CDE"), first);
+        assert_eq!(provider.get_config("ABC", "DE"), second);
+    }
+
+    #[test]
     fn test_config_constants() {
         assert_eq!(InstrumentConfig::STANDARD.price_divisor, 100_000.0);
         assert_eq!(InstrumentConfig::JPY.price_divisor, 1_000.0);
         assert_eq!(InstrumentConfig::METALS.price_divisor, 1_000.0);
+        assert_eq!(InstrumentConfig::INDEX.price_divisor, 1_000.0);
     }
 }

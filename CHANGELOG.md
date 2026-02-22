@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### Fetcher Universe Sync
+- New CLI command: `fx_fetcher sync-universe`
+- Discovers instruments from public Dukascopy catalog pages (`sitemap.xml` + category pages)
+- Supports `--dry-run` to preview changes without writing files
+- Supports `--activate-new` to auto-enable newly discovered instruments
+- Supports `--source URL` and `--universe PATH` for custom sync targets
+
+#### Catalog Merge Safety
+- Automatic merge of discovered instruments into `config/universe.json`
+- Existing manual entries are preserved
+- Newly discovered instruments default to `active=false` unless explicitly activated
+- Deterministic JSON output ordering for stable diffs
+
+#### Alias Resolution Improvements
+- Added alias chain resolution support (e.g. `SP500 -> US500 -> USA500IDX`)
+- Added loop-safe alias resolution behavior
+- Added catalog validation for alias canonical targets (canonical code must exist in catalog)
+
+#### Test Coverage
+- Added tests for sitemap/category slug extraction
+- Added tests for symbol split/inference and catalog merge behavior
+- Added tests for alias chain resolution and alias canonical validation
+
+### Changed
+
+- Fetcher CLI usage/help updated with `sync-universe` workflow
+- README updated with sync commands and discovery-oriented universe maintenance flow
+- Alias handling in client/catalog now resolves to final canonical code consistently
+
 ## [0.3.0] - 2026-01-20
 
 ### Added

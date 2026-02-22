@@ -6,8 +6,47 @@
 //! - Ticker API works as expected
 //! - Weekend/market hours handling
 
-use chrono::{Datelike, Duration, TimeZone, Utc};
-use dukascopy_fx::{CurrencyPair, Ticker};
+use chrono::{Datelike, Duration, TimeZone, Timelike, Utc};
+use dukascopy_fx::advanced::{ConversionMode, DukascopyClientBuilder, PairResolutionMode};
+use dukascopy_fx::{CurrencyPair, DukascopyError, Ticker};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct StooqDailyRow {
+    #[serde(rename = "Date")]
+    date: String,
+    #[serde(rename = "Close")]
+    close: f64,
+}
+
+async fn stooq_daily_close(symbol: &str, date: &str) -> Result<f64, Box<dyn std::error::Error>> {
+    let url = format!("https://stooq.com/q/d/l/?s={}&i=d", symbol);
+    let response = reqwest::get(&url).await?;
+    if !response.status().is_success() {
+        return Err(format!("Stooq request failed for {}: {}", symbol, response.status()).into());
+    }
+
+    let body = response.text().await?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(body.as_bytes());
+
+    for row in reader.deserialize::<StooqDailyRow>() {
+        let row = row?;
+        if row.date == date {
+            return Ok(row.close);
+        }
+    }
+
+    Err(format!("No Stooq close found for symbol={} date={}", symbol, date).into())
+}
+
+fn relative_diff(left: f64, right: f64) -> f64 {
+    if right == 0.0 {
+        return f64::INFINITY;
+    }
+    (left - right).abs() / right.abs()
+}
 
 // ============================================================================
 // Basic API Tests
@@ -64,6 +103,56 @@ async fn test_get_rate_eur_usd() {
         exchange.bid,
         exchange.ask
     );
+}
+
+#[tokio::test]
+async fn test_get_rate_aapl_usd_supports_market_instrument_path() {
+    let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
+    let result = dukascopy_fx::get_rate("AAPL", "USD", timestamp).await;
+
+    match result {
+        Ok(exchange) => {
+            let rate: f64 = exchange.rate.try_into().unwrap();
+            assert!(rate > 1.0, "AAPL/USD rate should be positive, got {}", rate);
+        }
+        Err(err) => {
+            assert!(
+                !err.is_validation_error(),
+                "AAPL/USD should not fail validation path, got: {}",
+                err
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_client_default_quote_symbol_request_matches_explicit_pair() {
+    let client = DukascopyClientBuilder::new()
+        .default_quote_currency("PLN")
+        .pair_resolution_mode(PairResolutionMode::ExplicitOrDefaultQuote)
+        .conversion_mode(ConversionMode::DirectOnly)
+        .build();
+
+    let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
+    let symbol_rate = client.get_exchange_rate_for_symbol("USD", timestamp).await;
+    let explicit_rate = client
+        .get_exchange_rate(&CurrencyPair::new("USD", "PLN"), timestamp)
+        .await;
+
+    assert!(
+        symbol_rate.is_ok(),
+        "symbol request failed: {:?}",
+        symbol_rate
+    );
+    assert!(
+        explicit_rate.is_ok(),
+        "explicit pair request failed: {:?}",
+        explicit_rate
+    );
+
+    let symbol_rate = symbol_rate.unwrap();
+    let explicit_rate = explicit_rate.unwrap();
+    assert_eq!(symbol_rate.rate, explicit_rate.rate);
 }
 
 // ============================================================================
@@ -159,6 +248,157 @@ async fn test_standard_pair_correct_divisor() {
         rate > 1.0 && rate < 1.6,
         "GBP/USD rate {} is out of expected range (1.0-1.6). Check divisor!",
         rate
+    );
+}
+
+#[tokio::test]
+async fn test_cross_source_metals_close_is_reasonably_close_to_stooq() {
+    let date = "2025-01-10";
+
+    let xau_ts = Utc.with_ymd_and_hms(2025, 1, 10, 21, 55, 0).unwrap();
+    let xag_ts = Utc.with_ymd_and_hms(2025, 1, 10, 21, 55, 0).unwrap();
+
+    let xau = dukascopy_fx::get_rate("XAU", "USD", xau_ts)
+        .await
+        .expect("Failed to fetch XAU/USD from Dukascopy");
+    let xag = dukascopy_fx::get_rate("XAG", "USD", xag_ts)
+        .await
+        .expect("Failed to fetch XAG/USD from Dukascopy");
+
+    let xau_ref = stooq_daily_close("xauusd", date)
+        .await
+        .expect("Failed to fetch XAUUSD close from Stooq");
+    let xag_ref = stooq_daily_close("xagusd", date)
+        .await
+        .expect("Failed to fetch XAGUSD close from Stooq");
+
+    let xau_rate: f64 = xau.rate.try_into().unwrap();
+    let xag_rate: f64 = xag.rate.try_into().unwrap();
+    let xau_diff = relative_diff(xau_rate, xau_ref);
+    let xag_diff = relative_diff(xag_rate, xag_ref);
+
+    assert!(
+        xau_diff <= 0.05,
+        "XAU/USD differs too much vs Stooq: dukascopy={}, stooq={}, rel_diff={:.4}",
+        xau_rate,
+        xau_ref,
+        xau_diff
+    );
+    assert!(
+        xag_diff <= 0.05,
+        "XAG/USD differs too much vs Stooq: dukascopy={}, stooq={}, rel_diff={:.4}",
+        xag_rate,
+        xag_ref,
+        xag_diff
+    );
+}
+
+#[tokio::test]
+async fn test_cross_source_indices_close_is_reasonably_close_to_stooq() {
+    let date = "2025-01-10";
+
+    let usa500_ts = Utc.with_ymd_and_hms(2025, 1, 10, 21, 0, 0).unwrap();
+    let deuidx_ts = Utc.with_ymd_and_hms(2025, 1, 10, 15, 30, 0).unwrap();
+
+    let usa500 = dukascopy_fx::get_rate("USA500IDX", "USD", usa500_ts)
+        .await
+        .expect("Failed to fetch USA500IDX/USD from Dukascopy");
+    let deuidx = dukascopy_fx::get_rate("DEUIDX", "EUR", deuidx_ts)
+        .await
+        .expect("Failed to fetch DEUIDX/EUR from Dukascopy");
+
+    let usa500_ref = stooq_daily_close("%5Espx", date)
+        .await
+        .expect("Failed to fetch ^SPX close from Stooq");
+    let deuidx_ref = stooq_daily_close("%5Edax", date)
+        .await
+        .expect("Failed to fetch ^DAX close from Stooq");
+
+    let usa500_rate: f64 = usa500.rate.try_into().unwrap();
+    let deuidx_rate: f64 = deuidx.rate.try_into().unwrap();
+
+    let usa500_diff = relative_diff(usa500_rate, usa500_ref);
+    let deuidx_diff = relative_diff(deuidx_rate, deuidx_ref);
+
+    assert!(
+        usa500_diff <= 0.08,
+        "USA500IDX/USD differs too much vs ^SPX: dukascopy={}, stooq={}, rel_diff={:.4}",
+        usa500_rate,
+        usa500_ref,
+        usa500_diff
+    );
+    assert!(
+        deuidx_diff <= 0.08,
+        "DEUIDX/EUR differs too much vs ^DAX: dukascopy={}, stooq={}, rel_diff={:.4}",
+        deuidx_rate,
+        deuidx_ref,
+        deuidx_diff
+    );
+}
+
+#[tokio::test]
+async fn test_cross_source_us_stock_close_is_reasonably_close_to_stooq() {
+    let date = "2025-01-10";
+    let ts = Utc.with_ymd_and_hms(2025, 1, 10, 20, 59, 0).unwrap();
+
+    let aapl = dukascopy_fx::get_rate("AAPLUS", "USD", ts)
+        .await
+        .expect("Failed to fetch AAPLUS/USD from Dukascopy");
+    let aapl_ref = stooq_daily_close("aapl.us", date)
+        .await
+        .expect("Failed to fetch AAPL.US close from Stooq");
+
+    let aapl_rate: f64 = aapl.rate.try_into().unwrap();
+    let aapl_diff = relative_diff(aapl_rate, aapl_ref);
+
+    assert!(
+        aapl_diff <= 0.06,
+        "AAPLUS/USD differs too much vs AAPL.US: dukascopy={}, stooq={}, rel_diff={:.4}",
+        aapl_rate,
+        aapl_ref,
+        aapl_diff
+    );
+}
+
+#[tokio::test]
+async fn test_cross_source_additional_indices_close_is_reasonably_close_to_stooq() {
+    let date = "2025-01-10";
+    let usa_tech_ts = Utc.with_ymd_and_hms(2025, 1, 10, 20, 59, 0).unwrap();
+    let hkg_ts = Utc.with_ymd_and_hms(2025, 1, 10, 16, 59, 0).unwrap();
+
+    let usa_tech = dukascopy_fx::get_rate("USATECHIDX", "USD", usa_tech_ts)
+        .await
+        .expect("Failed to fetch USATECHIDX/USD from Dukascopy");
+    let hkg = dukascopy_fx::get_rate("HKGIDX", "HKD", hkg_ts)
+        .await
+        .expect("Failed to fetch HKGIDX/HKD from Dukascopy");
+
+    let usa_tech_ref = stooq_daily_close("%5Endx", date)
+        .await
+        .expect("Failed to fetch ^NDX close from Stooq");
+    let hkg_ref = stooq_daily_close("%5Ehsi", date)
+        .await
+        .expect("Failed to fetch ^HSI close from Stooq");
+
+    let usa_tech_rate: f64 = usa_tech.rate.try_into().unwrap();
+    let hkg_rate: f64 = hkg.rate.try_into().unwrap();
+
+    let usa_tech_diff = relative_diff(usa_tech_rate, usa_tech_ref);
+    let hkg_diff = relative_diff(hkg_rate, hkg_ref);
+
+    assert!(
+        usa_tech_diff <= 0.08,
+        "USATECHIDX/USD differs too much vs ^NDX: dukascopy={}, stooq={}, rel_diff={:.4}",
+        usa_tech_rate,
+        usa_tech_ref,
+        usa_tech_diff
+    );
+    assert!(
+        hkg_diff <= 0.08,
+        "HKGIDX/HKD differs too much vs ^HSI: dukascopy={}, stooq={}, rel_diff={:.4}",
+        hkg_rate,
+        hkg_ref,
+        hkg_diff
     );
 }
 
@@ -258,8 +498,8 @@ async fn test_currency_pair_parsing() {
 
 #[tokio::test]
 async fn test_currency_pair_invalid() {
-    assert!("EU/USD".parse::<CurrencyPair>().is_err()); // Too short
-    assert!("EURO/USD".parse::<CurrencyPair>().is_err()); // Too long
+    assert!("E/USD".parse::<CurrencyPair>().is_err()); // Too short
+    assert!("TOO_LONG_INSTRUMENT/USD".parse::<CurrencyPair>().is_err()); // Too long
     assert!("EUR".parse::<CurrencyPair>().is_err()); // Missing second currency
 }
 
@@ -310,6 +550,23 @@ async fn test_weekend_data_returns_friday() {
     );
 }
 
+#[tokio::test]
+async fn test_friday_after_close_returns_last_tick() {
+    // Friday after close should map to the last available Friday tick
+    let friday_after_close = Utc.with_ymd_and_hms(2025, 1, 3, 22, 30, 0).unwrap();
+
+    let result = dukascopy_fx::get_rate("EUR", "USD", friday_after_close).await;
+    assert!(
+        result.is_ok(),
+        "Friday after close should return Friday last tick: {:?}",
+        result.err()
+    );
+
+    let exchange = result.unwrap();
+    assert_eq!(exchange.timestamp.weekday(), chrono::Weekday::Fri);
+    assert_eq!(exchange.timestamp.hour(), 21);
+}
+
 // ============================================================================
 // Range Query Tests
 // ============================================================================
@@ -336,13 +593,22 @@ async fn test_get_rates_range() {
     }
 }
 
+#[tokio::test]
+async fn test_get_rates_range_rejects_non_positive_interval() {
+    let end = Utc.with_ymd_and_hms(2025, 1, 3, 14, 0, 0).unwrap();
+    let start = end - Duration::hours(3);
+
+    let result = dukascopy_fx::get_rates_range("EUR", "USD", start, end, Duration::zero()).await;
+    assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+}
+
 // ============================================================================
 // Error Handling Tests
 // ============================================================================
 
 #[tokio::test]
 async fn test_invalid_currency_code() {
-    let result = CurrencyPair::try_new("EU", "USD");
+    let result = CurrencyPair::try_new("E", "USD");
     assert!(result.is_err());
 
     if let Err(e) = result {

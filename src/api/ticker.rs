@@ -1,8 +1,10 @@
 //! yfinance-style Ticker API for forex data.
 
-use crate::core::client::DukascopyClient;
+use crate::core::client::{ConfiguredClient, DukascopyClient};
 use crate::error::DukascopyError;
+use crate::market::last_available_tick_time;
 use crate::models::{CurrencyExchange, CurrencyPair};
+use crate::storage::checkpoint::CheckpointStore;
 use chrono::{DateTime, Duration, Utc};
 use std::str::FromStr;
 
@@ -68,6 +70,12 @@ impl Ticker {
         self.pair.as_symbol()
     }
 
+    /// Returns sampling interval used by this ticker.
+    #[inline]
+    pub fn interval_value(&self) -> Duration {
+        self.interval
+    }
+
     // ==================== Data Fetching ====================
 
     /// Fetches the exchange rate at a specific timestamp.
@@ -76,6 +84,15 @@ impl Ticker {
         timestamp: DateTime<Utc>,
     ) -> Result<CurrencyExchange, DukascopyError> {
         DukascopyClient::get_exchange_rate(&self.pair, timestamp).await
+    }
+
+    /// Fetches the exchange rate at a specific timestamp using a configured client.
+    pub async fn rate_at_with_client(
+        &self,
+        client: &ConfiguredClient,
+        timestamp: DateTime<Utc>,
+    ) -> Result<CurrencyExchange, DukascopyError> {
+        client.get_exchange_rate(&self.pair, timestamp).await
     }
 
     /// Fetches the most recent available exchange rate.
@@ -94,10 +111,43 @@ impl Ticker {
     /// - `"3mo"` - 3 months
     /// - `"1y"` - 1 year
     pub async fn history(&self, period: &str) -> Result<Vec<CurrencyExchange>, DukascopyError> {
-        let duration = parse_period(period)?;
         let end = Utc::now() - Duration::hours(1);
+        self.history_from_end(period, end).await
+    }
+
+    /// Fetches historical data for a time period using a configured client.
+    pub async fn history_with_client(
+        &self,
+        client: &ConfiguredClient,
+        period: &str,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let end = Utc::now() - Duration::hours(1);
+        self.history_from_end_with_client(client, period, end).await
+    }
+
+    /// Fetches historical data for a time period ending at a specific timestamp.
+    pub async fn history_from_end(
+        &self,
+        period: &str,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let duration = parse_period(period)?;
         let start = end - duration;
-        DukascopyClient::get_exchange_rates_range(&self.pair, start, end, self.interval).await
+        self.history_range(start, end).await
+    }
+
+    /// Fetches historical data for a time period ending at a specific timestamp using a configured client.
+    pub async fn history_from_end_with_client(
+        &self,
+        client: &ConfiguredClient,
+        period: &str,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let duration = parse_period(period)?;
+        let start = end - duration;
+        client
+            .get_exchange_rates_range(&self.pair, start, end, self.interval)
+            .await
     }
 
     /// Fetches historical data between two dates.
@@ -107,6 +157,122 @@ impl Ticker {
         end: DateTime<Utc>,
     ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
         DukascopyClient::get_exchange_rates_range(&self.pair, start, end, self.interval).await
+    }
+
+    /// Fetches historical data between two dates using a configured client.
+    pub async fn history_range_with_client(
+        &self,
+        client: &ConfiguredClient,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        client
+            .get_exchange_rates_range(&self.pair, start, end, self.interval)
+            .await
+    }
+
+    /// Incrementally fetches newly available data and updates checkpoint.
+    ///
+    /// If checkpoint is missing, uses `lookback` as initial backfill range.
+    pub async fn fetch_incremental<S: CheckpointStore>(
+        &self,
+        store: &S,
+        lookback: Duration,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let end = last_available_tick_time(Utc::now() - Duration::hours(1));
+        self.fetch_incremental_at(store, lookback, end).await
+    }
+
+    /// Incrementally fetches newly available data using a configured client and updates checkpoint.
+    pub async fn fetch_incremental_with_client<S: CheckpointStore>(
+        &self,
+        client: &ConfiguredClient,
+        store: &S,
+        lookback: Duration,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let end = last_available_tick_time(Utc::now() - Duration::hours(1));
+        self.fetch_incremental_with_client_at(client, store, lookback, end)
+            .await
+    }
+
+    /// Incrementally fetches data up to a provided end timestamp.
+    pub async fn fetch_incremental_at<S: CheckpointStore>(
+        &self,
+        store: &S,
+        lookback: Duration,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        self.fetch_incremental_with_fetch_fn(store, lookback, end, |start, range_end| async move {
+            self.history_range(start, range_end).await
+        })
+        .await
+    }
+
+    /// Incrementally fetches data up to a provided end timestamp using a configured client.
+    pub async fn fetch_incremental_with_client_at<S: CheckpointStore>(
+        &self,
+        client: &ConfiguredClient,
+        store: &S,
+        lookback: Duration,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        self.fetch_incremental_with_fetch_fn(store, lookback, end, |start, range_end| async move {
+            self.history_range_with_client(client, start, range_end)
+                .await
+        })
+        .await
+    }
+
+    async fn fetch_incremental_with_fetch_fn<S, F, Fut>(
+        &self,
+        store: &S,
+        lookback: Duration,
+        end: DateTime<Utc>,
+        fetch_fn: F,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError>
+    where
+        S: CheckpointStore,
+        F: Fn(DateTime<Utc>, DateTime<Utc>) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<CurrencyExchange>, DukascopyError>>,
+    {
+        if self.interval <= Duration::zero() {
+            return Err(DukascopyError::InvalidRequest(
+                "Interval must be a positive duration".to_string(),
+            ));
+        }
+
+        if lookback <= Duration::zero() {
+            return Err(DukascopyError::InvalidRequest(
+                "Lookback must be a positive duration".to_string(),
+            ));
+        }
+
+        let checkpoint_key = self.checkpoint_key();
+        let end = last_available_tick_time(end);
+        let retry_buffer = self.interval + self.interval;
+        let start = match store.get(&checkpoint_key)? {
+            Some(last_timestamp) => last_timestamp - retry_buffer,
+            None => end - lookback,
+        };
+
+        if start >= end {
+            return Ok(Vec::new());
+        }
+
+        let rates = fetch_fn(start, end).await?;
+        let rates = deduplicate_by_timestamp(rates);
+
+        if let Some(last) = rates.last() {
+            store.set(&checkpoint_key, last.timestamp)?;
+        }
+
+        Ok(rates)
+    }
+
+    /// Returns a stable checkpoint key for this ticker.
+    #[inline]
+    pub fn checkpoint_key(&self) -> String {
+        format!("{}:{}", self.symbol(), self.interval.num_seconds())
     }
 
     // ==================== Convenience Constructors ====================
@@ -185,13 +351,20 @@ fn parse_period(period: &str) -> Result<Duration, DukascopyError> {
         ));
     }
 
-    Ok(match unit {
+    let duration = match unit {
         "d" => Duration::days(num),
         "w" => Duration::weeks(num),
         "mo" => Duration::days(num * 30),
         "y" => Duration::days(num * 365),
-        _ => unreachable!(),
-    })
+        _ => {
+            return Err(DukascopyError::InvalidRequest(format!(
+                "Invalid period format: '{}'. Use '1d', '1w', '1mo', '1y'",
+                period
+            )))
+        }
+    };
+
+    Ok(duration)
 }
 
 // ============================================================================
@@ -225,6 +398,26 @@ pub async fn download_range(
     Ok(results)
 }
 
+/// Incrementally downloads data for multiple tickers using checkpoint store.
+pub async fn download_incremental<S: CheckpointStore>(
+    tickers: &[Ticker],
+    store: &S,
+    lookback: Duration,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    let mut results = Vec::with_capacity(tickers.len());
+    for ticker in tickers {
+        let history = ticker.fetch_incremental(store, lookback).await?;
+        results.push((ticker.clone(), history));
+    }
+    Ok(results)
+}
+
+fn deduplicate_by_timestamp(mut history: Vec<CurrencyExchange>) -> Vec<CurrencyExchange> {
+    history.sort_by_key(|rate| rate.timestamp);
+    history.dedup_by_key(|rate| rate.timestamp);
+    history
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -232,6 +425,45 @@ pub async fn download_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+    use rust_decimal::Decimal;
+    use std::collections::HashMap;
+    use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct InMemoryCheckpointStore {
+        data: Mutex<HashMap<String, DateTime<Utc>>>,
+    }
+
+    impl CheckpointStore for InMemoryCheckpointStore {
+        fn get(&self, key: &str) -> Result<Option<DateTime<Utc>>, DukascopyError> {
+            let data = self.data.lock().map_err(|err| {
+                DukascopyError::Unknown(format!("Checkpoint lock poisoned: {}", err))
+            })?;
+            Ok(data.get(key).cloned())
+        }
+
+        fn set(&self, key: &str, timestamp: DateTime<Utc>) -> Result<(), DukascopyError> {
+            let mut data = self.data.lock().map_err(|err| {
+                DukascopyError::Unknown(format!("Checkpoint lock poisoned: {}", err))
+            })?;
+            data.insert(key.to_string(), timestamp);
+            Ok(())
+        }
+    }
+
+    fn sample_exchange(ts: DateTime<Utc>) -> CurrencyExchange {
+        CurrencyExchange {
+            pair: CurrencyPair::new("EUR", "USD"),
+            rate: Decimal::from_str("1.10000").unwrap(),
+            timestamp: ts,
+            ask: Decimal::from_str("1.10010").unwrap(),
+            bid: Decimal::from_str("1.09990").unwrap(),
+            ask_volume: 1.0,
+            bid_volume: 1.0,
+        }
+    }
 
     #[test]
     fn test_ticker_new() {
@@ -246,6 +478,9 @@ mod tests {
 
         let ticker = Ticker::parse("USDJPY").unwrap();
         assert_eq!(ticker.symbol(), "USDJPY");
+
+        let ticker = Ticker::parse("AAPL/USD").unwrap();
+        assert_eq!(ticker.symbol(), "AAPLUSD");
     }
 
     #[test]
@@ -282,5 +517,131 @@ mod tests {
     fn test_ticker_interval() {
         let ticker = Ticker::new("EUR", "USD").interval(Duration::minutes(30));
         assert_eq!(ticker.interval, Duration::minutes(30));
+    }
+
+    #[test]
+    fn test_checkpoint_key() {
+        let ticker = Ticker::new("EUR", "USD").interval(Duration::minutes(30));
+        assert_eq!(ticker.checkpoint_key(), "EURUSD:1800");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_incremental_at_uses_lookback_without_checkpoint() {
+        let store = InMemoryCheckpointStore::default();
+        let ticker = Ticker::new("EUR", "USD").interval(Duration::hours(1));
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
+
+        let observed = Arc::new(Mutex::new(None::<(DateTime<Utc>, DateTime<Utc>)>));
+        let observed_clone = Arc::clone(&observed);
+        let rows = ticker
+            .fetch_incremental_with_fetch_fn(
+                &store,
+                Duration::hours(6),
+                end,
+                move |start, range_end| {
+                    let observed_clone = Arc::clone(&observed_clone);
+                    async move {
+                        let mut slot = observed_clone.lock().unwrap();
+                        *slot = Some((start, range_end));
+                        Ok(Vec::new())
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(rows.is_empty());
+        let (start, range_end) = observed.lock().unwrap().unwrap();
+        let expected_end = last_available_tick_time(end);
+        assert_eq!(range_end, expected_end);
+        assert_eq!(start, expected_end - Duration::hours(6));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_incremental_at_with_checkpoint_uses_retry_buffer() {
+        let store = InMemoryCheckpointStore::default();
+        let ticker = Ticker::new("EUR", "USD").interval(Duration::hours(1));
+        let checkpoint_key = ticker.checkpoint_key();
+        let checkpoint_ts = Utc.with_ymd_and_hms(2025, 1, 10, 8, 0, 0).unwrap();
+        store.set(&checkpoint_key, checkpoint_ts).unwrap();
+
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
+        let observed = Arc::new(Mutex::new(None::<(DateTime<Utc>, DateTime<Utc>)>));
+        let observed_clone = Arc::clone(&observed);
+
+        let _ = ticker
+            .fetch_incremental_with_fetch_fn(
+                &store,
+                Duration::hours(24),
+                end,
+                move |start, range_end| {
+                    let observed_clone = Arc::clone(&observed_clone);
+                    async move {
+                        let mut slot = observed_clone.lock().unwrap();
+                        *slot = Some((start, range_end));
+                        Ok(Vec::new())
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        let (start, _) = observed.lock().unwrap().unwrap();
+        assert_eq!(start, checkpoint_ts - Duration::hours(2));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_incremental_at_deduplicates_and_updates_checkpoint() {
+        let store = InMemoryCheckpointStore::default();
+        let ticker = Ticker::new("EUR", "USD").interval(Duration::hours(1));
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
+        let first = Utc.with_ymd_and_hms(2025, 1, 10, 7, 0, 0).unwrap();
+        let second = Utc.with_ymd_and_hms(2025, 1, 10, 8, 0, 0).unwrap();
+
+        let rows = ticker
+            .fetch_incremental_with_fetch_fn(
+                &store,
+                Duration::hours(4),
+                end,
+                move |_start, _end| async move {
+                    Ok(vec![
+                        sample_exchange(first),
+                        sample_exchange(first),
+                        sample_exchange(second),
+                    ])
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        let checkpoint = store.get(&ticker.checkpoint_key()).unwrap().unwrap();
+        assert_eq!(checkpoint, second);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_incremental_at_rejects_non_positive_lookback() {
+        let store = InMemoryCheckpointStore::default();
+        let ticker = Ticker::new("EUR", "USD");
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
+
+        let result = ticker
+            .fetch_incremental_with_fetch_fn(
+                &store,
+                Duration::zero(),
+                end,
+                |_start, _end| async move { Ok(Vec::new()) },
+            )
+            .await;
+
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_history_from_end_rejects_invalid_period_without_network_call() {
+        let ticker = Ticker::new("EUR", "USD");
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
+        let result = ticker.history_from_end("bad", end).await;
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
     }
 }

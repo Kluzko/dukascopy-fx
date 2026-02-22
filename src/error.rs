@@ -61,6 +61,18 @@ pub enum DukascopyError {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
+    /// Missing configured default quote currency for symbol-only request.
+    #[error("Missing default quote currency in client configuration")]
+    MissingDefaultQuoteCurrency,
+
+    /// Symbol-only resolution is disabled in client configuration.
+    #[error("Symbol-only pair resolution is disabled in client configuration")]
+    PairResolutionDisabled,
+
+    /// No available direct or synthetic route for symbol conversion.
+    #[error("No conversion route found for {symbol}/{quote}")]
+    NoConversionRoute { symbol: String, quote: String },
+
     /// Request timeout
     #[error("Request timed out after {0} seconds")]
     Timeout(u64),
@@ -98,6 +110,16 @@ impl DukascopyError {
         matches!(
             self,
             Self::InvalidCurrencyCode { .. } | Self::InvalidTickData | Self::InvalidRequest(_)
+        )
+    }
+
+    /// Returns true if error is caused by client configuration.
+    pub fn is_configuration_error(&self) -> bool {
+        matches!(
+            self,
+            Self::MissingDefaultQuoteCurrency
+                | Self::PairResolutionDisabled
+                | Self::NoConversionRoute { .. }
         )
     }
 }
@@ -176,6 +198,18 @@ mod tests {
         .is_validation_error());
 
         assert!(!DukascopyError::DataNotFound.is_validation_error());
+    }
+
+    #[test]
+    fn test_is_configuration_error() {
+        assert!(DukascopyError::MissingDefaultQuoteCurrency.is_configuration_error());
+        assert!(DukascopyError::PairResolutionDisabled.is_configuration_error());
+        assert!(DukascopyError::NoConversionRoute {
+            symbol: "AAPL".into(),
+            quote: "PLN".into()
+        }
+        .is_configuration_error());
+        assert!(!DukascopyError::DataNotFound.is_configuration_error());
     }
 
     #[test]

@@ -8,33 +8,33 @@
 /// use dukascopy_fx::datetime;
 ///
 /// // Full datetime
-/// let dt = datetime!(2024-01-15 14:30:00 UTC);
+/// let dt = datetime!(2024-1-15 14:30:00 UTC);
 ///
 /// // Without seconds (defaults to 0)
-/// let dt = datetime!(2024-01-15 14:30 UTC);
+/// let dt = datetime!(2024-1-15 14:30 UTC);
 ///
 /// // Date only (midnight)
-/// let dt = datetime!(2024-01-15 UTC);
+/// let dt = datetime!(2024-1-15 UTC);
 /// ```
 ///
 /// # Example
 /// ```
 /// use dukascopy_fx::datetime;
 ///
-/// let timestamp = datetime!(2024-06-15 10:30 UTC);
+/// let timestamp = datetime!(2024-6-15 10:30 UTC);
 /// assert_eq!(timestamp.to_string(), "2024-06-15 10:30:00 UTC");
 /// ```
 #[macro_export]
 macro_rules! datetime {
-    // Full format: 2024-01-15 14:30:00 UTC
+    // Full format: 2024-1-15 14:30:00 UTC
     ($year:literal-$month:literal-$day:literal $hour:literal:$min:literal:$sec:literal UTC) => {
         $crate::time::datetime_utc($year, $month, $day, $hour, $min, $sec)
     };
-    // Without seconds: 2024-01-15 14:30 UTC
+    // Without seconds: 2024-1-15 14:30 UTC
     ($year:literal-$month:literal-$day:literal $hour:literal:$min:literal UTC) => {
         $crate::time::datetime_utc($year, $month, $day, $hour, $min, 0)
     };
-    // Date only: 2024-01-15 UTC
+    // Date only: 2024-1-15 UTC
     ($year:literal-$month:literal-$day:literal UTC) => {
         $crate::time::datetime_utc($year, $month, $day, 0, 0, 0)
     };
@@ -65,7 +65,7 @@ macro_rules! ticker {
 mod tests {
     #[test]
     fn test_datetime_macro_full() {
-        let dt = datetime!(2024-01-15 14:30:45 UTC);
+        let dt = datetime!(2024-1-15 14:30:45 UTC);
         use chrono::{Datelike, Timelike};
         assert_eq!(dt.year(), 2024);
         assert_eq!(dt.month(), 1);
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn test_datetime_macro_no_seconds() {
-        let dt = datetime!(2024-06-15 10:30 UTC);
+        let dt = datetime!(2024-6-15 10:30 UTC);
         use chrono::{Datelike, Timelike};
         assert_eq!(dt.year(), 2024);
         assert_eq!(dt.month(), 6);
