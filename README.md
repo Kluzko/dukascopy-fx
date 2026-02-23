@@ -22,7 +22,7 @@ CLI tooling exists, but is secondary.
 
 ```toml
 [dependencies]
-dukascopy-fx = "0.4"
+dukascopy-fx = "0.4.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -128,6 +128,36 @@ let ticker = Ticker::new("EUR", "USD").interval(Duration::hours(1));
 let rows = ticker.fetch_incremental(&store, Duration::days(7)).await?;
 println!("fetched {} rows", rows.len());
 ```
+
+## Public API (0.4.0)
+
+Most-used free functions:
+- `get_rate(from, to, timestamp)`
+- `get_rate_for_pair(&CurrencyPair, timestamp)`
+- `get_rate_for_request(&RateRequest, timestamp)`
+- `get_rate_for_input(input, timestamp)`
+- `get_rate_for_symbol(symbol, timestamp)`
+- `get_rate_in_quote(symbol, quote, timestamp)`
+- `get_rates_range(from, to, start, end, interval)`
+- `get_rates_range_for_pair(&CurrencyPair, start, end, interval)`
+
+Most-used `Ticker` methods:
+- `Ticker::new(from, to)`
+- `Ticker::parse("EUR/USD")`
+- `rate()`, `rate_at(timestamp)`
+- `history("1w")`, `history_range(start, end)`
+- `interval(Duration::minutes(30))`
+- `fetch_incremental(&store, lookback)`
+
+Most-used builder/client methods:
+- `DukascopyClientBuilder::new()`
+- `default_quote_currency("USD")` (spójna nazwa, brak `set_currency`)
+- `pair_resolution_mode(...)`
+- `conversion_mode(...)`, `bridge_currencies(...)`
+- `code_alias("AAPL", "AAPLUS")`
+- `build()`
+- `ConfiguredClient::get_exchange_rate_for_symbol(...)`
+- `ConfiguredClient::get_exchange_rate_in_quote(...)`
 
 ## Advanced Client (power users)
 
