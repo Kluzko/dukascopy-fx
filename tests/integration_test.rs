@@ -8,7 +8,7 @@
 
 use chrono::{Datelike, Duration, TimeZone, Timelike, Utc};
 use dukascopy_fx::advanced::{ConversionMode, DukascopyClientBuilder, PairResolutionMode};
-use dukascopy_fx::{CurrencyPair, DukascopyError, Ticker};
+use dukascopy_fx::{CurrencyPair, DukascopyError, RateRequest, Ticker};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +119,48 @@ async fn test_get_rate_aapl_usd_supports_market_instrument_path() {
             assert!(
                 !err.is_validation_error(),
                 "AAPL/USD should not fail validation path, got: {}",
+                err
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_get_rate_for_input_supports_explicit_pair() {
+    let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
+    let result = dukascopy_fx::get_rate_for_input("EUR/USD", timestamp).await;
+
+    assert!(
+        result.is_ok(),
+        "get_rate_for_input with pair failed: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_get_rate_for_request_supports_single_symbol() {
+    let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
+    let request = RateRequest::symbol("AAPL").unwrap();
+    let result = dukascopy_fx::get_rate_for_request(&request, timestamp).await;
+
+    match result {
+        Ok(exchange) => {
+            let rate: f64 = exchange.rate.try_into().unwrap();
+            assert!(rate > 1.0, "AAPL/USD rate should be positive, got {}", rate);
+        }
+        Err(err) => {
+            assert!(
+                !matches!(
+                    err,
+                    DukascopyError::MissingDefaultQuoteCurrency
+                        | DukascopyError::PairResolutionDisabled
+                ),
+                "global request API should support single-symbol resolution, got: {}",
+                err
+            );
+            assert!(
+                !err.is_validation_error(),
+                "AAPL request should not fail validation path, got: {}",
                 err
             );
         }

@@ -4,7 +4,7 @@ use crate::core::instrument::{InstrumentConfig, InstrumentProvider, OverrideInst
 use crate::core::parser::{DukascopyParser, ParsedTick, TICK_SIZE_BYTES};
 use crate::error::DukascopyError;
 use crate::market::{is_market_open, last_available_tick_time};
-use crate::models::{CurrencyExchange, CurrencyPair};
+use crate::models::{CurrencyExchange, CurrencyPair, RateRequest};
 
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use log::{debug, info, warn};
@@ -443,6 +443,20 @@ impl ConfiguredClient {
         let tick = DukascopyClient::find_tick_at_or_before(&data, target_ms, config)?;
 
         DukascopyClient::build_exchange_response(pair, effective_timestamp, tick, config)
+    }
+
+    /// Fetches exchange rate for unified request type (pair or symbol).
+    pub async fn get_exchange_rate_for_request(
+        &self,
+        request: &RateRequest,
+        timestamp: DateTime<Utc>,
+    ) -> Result<CurrencyExchange, DukascopyError> {
+        match request {
+            RateRequest::Pair(pair) => self.get_exchange_rate(pair, timestamp).await,
+            RateRequest::Symbol(symbol) => {
+                self.get_exchange_rate_for_symbol(symbol, timestamp).await
+            }
+        }
     }
 
     /// Fetches exchange rate for a symbol using configured default quote currency.
@@ -890,6 +904,17 @@ impl DukascopyClient {
         get_default_client()
             .await
             .get_exchange_rate(pair, timestamp)
+            .await
+    }
+
+    /// Fetches exchange rate for unified request type (pair or symbol).
+    pub async fn get_exchange_rate_for_request(
+        request: &RateRequest,
+        timestamp: DateTime<Utc>,
+    ) -> Result<CurrencyExchange, DukascopyError> {
+        get_default_client()
+            .await
+            .get_exchange_rate_for_request(request, timestamp)
             .await
     }
 
@@ -1445,6 +1470,47 @@ mod tests {
         assert!(matches!(
             result,
             Err(DukascopyError::PairResolutionDisabled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_exchange_rate_for_request_symbol_requires_default_quote() {
+        let client = DukascopyClientBuilder::new().build();
+        let ts = Utc::now();
+        let request = RateRequest::symbol("AAPL").unwrap();
+        let result = client.get_exchange_rate_for_request(&request, ts).await;
+        assert!(matches!(
+            result,
+            Err(DukascopyError::MissingDefaultQuoteCurrency)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_exchange_rate_for_request_symbol_respects_resolution_mode() {
+        let client = DukascopyClientBuilder::new()
+            .default_quote_currency("USD")
+            .pair_resolution_mode(PairResolutionMode::ExplicitOnly)
+            .build();
+        let ts = Utc::now();
+        let request = RateRequest::symbol("AAPL").unwrap();
+        let result = client.get_exchange_rate_for_request(&request, ts).await;
+        assert!(matches!(
+            result,
+            Err(DukascopyError::PairResolutionDisabled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_exchange_rate_for_request_pair_validates_before_network() {
+        let client = DukascopyClientBuilder::new().build();
+        let ts = Utc::now();
+        let invalid_pair = CurrencyPair::new("BAD$", "USD");
+        let request = RateRequest::Pair(invalid_pair);
+        let result = client.get_exchange_rate_for_request(&request, ts).await;
+
+        assert!(matches!(
+            result,
+            Err(DukascopyError::InvalidCurrencyCode { code, .. }) if code == "BAD$"
         ));
     }
 

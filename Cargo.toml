@@ -1,13 +1,13 @@
 [package]
 name = "dukascopy-fx"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Jakub Kluzniak <kluzniakkuba@gmail.com>"]
-description = "Rust Dukascopy market-data fetcher with yfinance-style API, incremental checkpoints, and multi-asset catalog support (FX, metals, indices, equities)."
+description = "Library-first Dukascopy market-data fetcher for FX, metals, indices, and equities with ticker API, incremental checkpoints, and universe catalog support."
 license = "MIT"
 repository = "https://github.com/Kluzko/dukascopy-fx"
-keywords = ["dukascopy", "forex", "market-data", "fetcher", "quant"]
-categories = ["api-bindings", "command-line-utilities", "finance"]
+keywords = ["dukascopy", "market-data", "forex", "trading", "quant"]
+categories = ["api-bindings", "finance"]
 readme = "README.md"
 
 

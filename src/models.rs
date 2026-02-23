@@ -30,6 +30,85 @@ pub struct CurrencyPair {
     to: String,
 }
 
+/// Unified request for rate queries.
+///
+/// Use [`RateRequest::Pair`] for explicit pair requests (e.g. `EUR/USD`)
+/// and [`RateRequest::Symbol`] for single-instrument requests (e.g. `AAPL`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RateRequest {
+    Pair(CurrencyPair),
+    Symbol(String),
+}
+
+impl RateRequest {
+    /// Creates a pair request.
+    pub fn pair(from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self::Pair(CurrencyPair::new(from, to))
+    }
+
+    /// Creates a symbol request with validation.
+    pub fn symbol(symbol: impl Into<String>) -> Result<Self, DukascopyError> {
+        let normalized = symbol.into().trim().to_ascii_uppercase();
+        CurrencyPair::validate_currency_code(&normalized)?;
+        Ok(Self::Symbol(normalized))
+    }
+
+    /// Returns pair if this is a pair request.
+    pub fn as_pair(&self) -> Option<&CurrencyPair> {
+        match self {
+            Self::Pair(pair) => Some(pair),
+            Self::Symbol(_) => None,
+        }
+    }
+
+    /// Returns symbol if this is a symbol request.
+    pub fn as_symbol(&self) -> Option<&str> {
+        match self {
+            Self::Pair(_) => None,
+            Self::Symbol(symbol) => Some(symbol),
+        }
+    }
+}
+
+impl fmt::Display for RateRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pair(pair) => write!(f, "{}", pair),
+            Self::Symbol(symbol) => write!(f, "{}", symbol),
+        }
+    }
+}
+
+impl From<CurrencyPair> for RateRequest {
+    fn from(value: CurrencyPair) -> Self {
+        Self::Pair(value)
+    }
+}
+
+impl FromStr for RateRequest {
+    type Err = DukascopyError;
+
+    /// Parses a request from input string.
+    ///
+    /// Rules:
+    /// - input containing `/` is parsed as explicit pair, e.g. `EUR/USD`
+    /// - otherwise input is parsed as symbol, e.g. `AAPL`, `EURUSD`, `USA500IDX`
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let normalized = input.trim();
+        if normalized.is_empty() {
+            return Err(DukascopyError::InvalidRequest(
+                "Request cannot be empty".to_string(),
+            ));
+        }
+
+        if normalized.contains('/') {
+            return Ok(Self::Pair(CurrencyPair::from_str(normalized)?));
+        }
+
+        Self::symbol(normalized)
+    }
+}
+
 impl CurrencyPair {
     /// Creates a new currency pair.
     ///
@@ -406,6 +485,37 @@ mod tests {
 
             let gold = CurrencyPair::new("XAU", "USD");
             assert_eq!(gold.price_divisor(), 1_000.0);
+        }
+    }
+
+    mod rate_request {
+        use super::*;
+
+        #[test]
+        fn test_parse_pair_request() {
+            let request: RateRequest = "EUR/USD".parse().unwrap();
+            let pair = request.as_pair().unwrap();
+            assert_eq!(pair.from(), "EUR");
+            assert_eq!(pair.to(), "USD");
+        }
+
+        #[test]
+        fn test_parse_symbol_request() {
+            let request: RateRequest = "aapl".parse().unwrap();
+            assert_eq!(request.as_symbol(), Some("AAPL"));
+        }
+
+        #[test]
+        fn test_parse_symbol_like_forex_without_slash() {
+            let request: RateRequest = "eurusd".parse().unwrap();
+            assert_eq!(request.as_symbol(), Some("EURUSD"));
+        }
+
+        #[test]
+        fn test_symbol_constructor_validation() {
+            assert!(RateRequest::symbol("AAPL").is_ok());
+            assert!(RateRequest::symbol("X").is_err());
+            assert!(RateRequest::symbol("BAD$").is_err());
         }
     }
 

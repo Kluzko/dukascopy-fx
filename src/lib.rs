@@ -107,7 +107,7 @@ pub mod time;
 pub use api::{download, download_incremental, download_range, Ticker};
 pub use core::catalog::{AssetClass, InstrumentCatalog, InstrumentDefinition};
 pub use error::DukascopyError;
-pub use models::{CurrencyExchange, CurrencyPair};
+pub use models::{CurrencyExchange, CurrencyPair, RateRequest};
 pub use storage::checkpoint::{CheckpointStore, FileCheckpointStore};
 pub use storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
 
@@ -128,6 +128,26 @@ use chrono::{DateTime, Duration, Utc};
 pub async fn get_rate(from: &str, to: &str, timestamp: DateTime<Utc>) -> Result<CurrencyExchange> {
     let pair = CurrencyPair::new(from, to);
     core::client::DukascopyClient::get_exchange_rate(&pair, timestamp).await
+}
+
+/// Fetches exchange rate for a unified request type (pair or symbol).
+#[inline]
+pub async fn get_rate_for_request(
+    request: &RateRequest,
+    timestamp: DateTime<Utc>,
+) -> Result<CurrencyExchange> {
+    core::client::DukascopyClient::get_exchange_rate_for_request(request, timestamp).await
+}
+
+/// Parses request from input and fetches exchange rate.
+///
+/// Parsing rules:
+/// - input containing `/` is parsed as pair (e.g. `EUR/USD`)
+/// - otherwise input is parsed as symbol (e.g. `AAPL`, `EURUSD`)
+#[inline]
+pub async fn get_rate_for_input(input: &str, timestamp: DateTime<Utc>) -> Result<CurrencyExchange> {
+    let request: RateRequest = input.parse()?;
+    get_rate_for_request(&request, timestamp).await
 }
 
 /// Fetches the exchange rate using a [`CurrencyPair`].
@@ -225,6 +245,7 @@ pub mod advanced {
     };
     pub use crate::core::parser::{DukascopyParser, ParsedTick, TICK_SIZE_BYTES};
     pub use crate::market::last_available_tick_time;
+    pub use crate::models::RateRequest;
     pub use crate::storage::checkpoint::{CheckpointStore, FileCheckpointStore};
     pub use crate::storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
 }
@@ -243,7 +264,7 @@ pub mod prelude {
     pub use crate::core::catalog::{AssetClass, InstrumentCatalog, InstrumentDefinition};
     pub use crate::error::DukascopyError;
     pub use crate::market::{is_market_open, is_weekend, MarketStatus};
-    pub use crate::models::{CurrencyExchange, CurrencyPair};
+    pub use crate::models::{CurrencyExchange, CurrencyPair, RateRequest};
     pub use crate::storage::checkpoint::{CheckpointStore, FileCheckpointStore};
     pub use crate::storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
     pub use crate::time::{
@@ -251,8 +272,8 @@ pub mod prelude {
     };
     pub use crate::{datetime, ticker};
     pub use crate::{
-        get_rate, get_rate_for_pair, get_rate_for_symbol, get_rate_in_quote, get_rates_range,
-        get_rates_range_for_pair,
+        get_rate, get_rate_for_input, get_rate_for_pair, get_rate_for_request, get_rate_for_symbol,
+        get_rate_in_quote, get_rates_range, get_rates_range_for_pair,
     };
     pub use crate::{Error, Result};
 }

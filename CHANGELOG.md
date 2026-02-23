@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+_No changes yet._
+
+## [0.4.0] - 2026-02-23
+
+### Added
+
+#### Unified Request API (library-first)
+- New `RateRequest` model for single-entry request handling:
+  - `RateRequest::Pair(CurrencyPair)` for explicit pair requests (`EUR/USD`)
+  - `RateRequest::Symbol(String)` for single-symbol requests (`AAPL`, `XAUUSD`)
+- `RateRequest` parsing via `FromStr`:
+  - input containing `/` is parsed as pair
+  - other input is parsed as single symbol
+- New helper functions:
+  - `get_rate_for_request(&RateRequest, timestamp)`
+  - `get_rate_for_input(&str, timestamp)`
+- Added conversion traits and formatting support for `RateRequest`.
+
 #### Fetcher Universe Sync
 - New CLI command: `fx_fetcher sync-universe`
 - Discovers instruments from public Dukascopy catalog pages (`sitemap.xml` + category pages)
@@ -28,15 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added catalog validation for alias canonical targets (canonical code must exist in catalog)
 
 #### Test Coverage
+- Added tests for `RateRequest` parsing/validation and mixed request flows.
 - Added tests for sitemap/category slug extraction
 - Added tests for symbol split/inference and catalog merge behavior
 - Added tests for alias chain resolution and alias canonical validation
 
 ### Changed
 
-- Fetcher CLI usage/help updated with `sync-universe` workflow
-- README updated with sync commands and discovery-oriented universe maintenance flow
-- Alias handling in client/catalog now resolves to final canonical code consistently
+- `README` reorganized for clearer library usage flow (single symbol + pair support).
+- Crate metadata improved (`description`, `keywords`, `categories`) for library-first discoverability.
+- Fetcher CLI usage/help updated with `sync-universe` workflow.
+- Alias handling in client/catalog now resolves to final canonical code consistently.
 
 ## [0.3.0] - 2026-01-20
 
