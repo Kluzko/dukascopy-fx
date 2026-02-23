@@ -277,3 +277,57 @@ pub mod prelude {
     };
     pub use crate::{Error, Result};
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[tokio::test]
+    async fn test_get_rate_for_input_rejects_empty_request() {
+        let err = get_rate_for_input("   ", Utc::now()).await.unwrap_err();
+        assert!(matches!(err, DukascopyError::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_get_rate_for_input_rejects_invalid_symbol() {
+        let err = get_rate_for_input("BAD$", Utc::now()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            DukascopyError::InvalidCurrencyCode { code, .. } if code == "BAD$"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_rate_for_input_rejects_invalid_pair() {
+        let err = get_rate_for_input("EUR/US$", Utc::now()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            DukascopyError::InvalidCurrencyCode { code, .. } if code == "US$"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_rate_for_request_rejects_invalid_pair_before_network() {
+        let request = RateRequest::pair("BAD$", "USD");
+        let err = get_rate_for_request(&request, Utc::now())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DukascopyError::InvalidCurrencyCode { code, .. } if code == "BAD$"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_rate_for_request_rejects_invalid_symbol_before_network() {
+        let request = RateRequest::Symbol("BAD$".to_string());
+        let err = get_rate_for_request(&request, Utc::now())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DukascopyError::InvalidCurrencyCode { code, .. } if code == "BAD$"
+        ));
+    }
+}

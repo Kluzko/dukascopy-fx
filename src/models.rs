@@ -500,6 +500,14 @@ mod tests {
         }
 
         #[test]
+        fn test_parse_pair_request_with_whitespace() {
+            let request: RateRequest = "  eur / usd  ".parse().unwrap();
+            let pair = request.as_pair().unwrap();
+            assert_eq!(pair.from(), "EUR");
+            assert_eq!(pair.to(), "USD");
+        }
+
+        #[test]
         fn test_parse_symbol_request() {
             let request: RateRequest = "aapl".parse().unwrap();
             assert_eq!(request.as_symbol(), Some("AAPL"));
@@ -516,6 +524,57 @@ mod tests {
             assert!(RateRequest::symbol("AAPL").is_ok());
             assert!(RateRequest::symbol("X").is_err());
             assert!(RateRequest::symbol("BAD$").is_err());
+        }
+
+        #[test]
+        fn test_pair_constructor_normalizes_codes() {
+            let request = RateRequest::pair("eur", "usd");
+            let pair = request.as_pair().unwrap();
+            assert_eq!(pair.from(), "EUR");
+            assert_eq!(pair.to(), "USD");
+        }
+
+        #[test]
+        fn test_pair_variant_as_symbol_is_none() {
+            let request = RateRequest::pair("EUR", "USD");
+            assert_eq!(request.as_symbol(), None);
+        }
+
+        #[test]
+        fn test_symbol_variant_as_pair_is_none() {
+            let request = RateRequest::symbol("AAPL").unwrap();
+            assert_eq!(request.as_pair(), None);
+        }
+
+        #[test]
+        fn test_display_for_pair_and_symbol() {
+            let pair_request = RateRequest::pair("eur", "usd");
+            let symbol_request = RateRequest::symbol("msft").unwrap();
+
+            assert_eq!(pair_request.to_string(), "EUR/USD");
+            assert_eq!(symbol_request.to_string(), "MSFT");
+        }
+
+        #[test]
+        fn test_from_currency_pair_conversion() {
+            let pair = CurrencyPair::new("GBP", "JPY");
+            let request: RateRequest = pair.clone().into();
+            assert_eq!(request.as_pair(), Some(&pair));
+        }
+
+        #[test]
+        fn test_parse_empty_request() {
+            let err = "   ".parse::<RateRequest>().unwrap_err();
+            assert!(matches!(err, DukascopyError::InvalidRequest(_)));
+        }
+
+        #[test]
+        fn test_parse_invalid_pair_request_propagates_validation_error() {
+            let err = "EUR/US$".parse::<RateRequest>().unwrap_err();
+            assert!(matches!(
+                err,
+                DukascopyError::InvalidCurrencyCode { code, .. } if code == "US$"
+            ));
         }
     }
 
