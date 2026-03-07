@@ -55,11 +55,18 @@ async fn main() -> dukascopy_fx::Result<()> {
 Use unified parsing when user input may be mixed (`AAPL` or `EUR/USD`).
 
 ```rust
-use dukascopy_fx::{get_rate_for_input, get_rate_for_request, RateRequest};
+use dukascopy_fx::{
+    get_rate_for_input,
+    get_rate_for_input_with_mode,
+    get_rate_for_request,
+    RateRequest,
+    RequestParseMode,
+};
 use dukascopy_fx::time::now;
 
 let fx = get_rate_for_input("EUR/USD", now()).await?;
 let stock = get_rate_for_input("AAPL", now()).await?;
+let strict_pair = get_rate_for_input_with_mode("EURUSD", RequestParseMode::PairOnly, now()).await?;
 
 let req = RateRequest::symbol("MSFT")?;
 let msft = get_rate_for_request(&req, now()).await?;
@@ -73,7 +80,7 @@ Parsing rules:
 ### 2) Ticker API
 
 ```rust
-use dukascopy_fx::{Ticker, ticker};
+use dukascopy_fx::{Period, Ticker, ticker};
 use dukascopy_fx::time::Duration;
 
 let t1 = Ticker::new("EUR", "USD");
@@ -81,6 +88,7 @@ let t2: Ticker = "GBP/JPY".parse()?;
 let t3 = ticker!("XAU/USD");
 
 let month = t1.history("1mo").await?;
+let typed = t1.history_period(Period::Weeks(1)).await?;
 let day_30m = t1.interval(Duration::minutes(30)).history("1d").await?;
 ```
 
@@ -105,7 +113,7 @@ let series = get_rates_range(
 ### 4) Batch download
 
 ```rust
-use dukascopy_fx::{download, Ticker};
+use dukascopy_fx::{download_with_concurrency, Ticker};
 
 let tickers = vec![
     Ticker::eur_usd(),
@@ -114,7 +122,7 @@ let tickers = vec![
     Ticker::xau_usd(),
 ];
 
-let batch = download(&tickers, "1w").await?;
+let batch = download_with_concurrency(&tickers, "1w", 4).await?;
 ```
 
 ### 5) Incremental updates (checkpoint)
@@ -137,6 +145,7 @@ Most-used free functions:
 - `get_rate_for_pair(&CurrencyPair, timestamp)`
 - `get_rate_for_request(&RateRequest, timestamp)`
 - `get_rate_for_input(input, timestamp)`
+- `get_rate_for_input_with_mode(input, RequestParseMode, timestamp)`
 - `get_rate_for_symbol(symbol, timestamp)`
 - `get_rate_in_quote(symbol, quote, timestamp)`
 - `get_rates_range(from, to, start, end, interval)`
@@ -147,6 +156,7 @@ Most-used `Ticker` methods:
 - `Ticker::parse("EUR/USD")`
 - `rate()`, `rate_at(timestamp)`
 - `history("1w")`, `history_range(start, end)`
+- `history_period(Period::Weeks(1))`
 - `interval(Duration::minutes(30))`
 - `fetch_incremental(&store, lookback)`
 
@@ -159,6 +169,12 @@ Most-used builder/client methods:
 - `build()`
 - `ConfiguredClient::get_exchange_rate_for_symbol(...)`
 - `ConfiguredClient::get_exchange_rate_in_quote(...)`
+- `max_at_or_before_backtrack_hours(...)`
+
+Batch helpers:
+- `download(...)`, `download_with_concurrency(...)`
+- `download_range(...)`, `download_range_with_concurrency(...)`
+- `download_incremental(...)`, `download_incremental_with_concurrency(...)`
 
 ## Advanced Client (power users)
 
@@ -237,6 +253,14 @@ Core commands:
 - Historical depth depends on instrument (major FX often available since 2003)
 - Data is fetched from hourly files; latest complete data is usually delayed by ~1 hour
 - Weekend handling adjusts requests to last available trading timestamp
+
+## Testing
+
+By default, `cargo test` runs unit/offline tests. Live integration tests are opt-in:
+
+```bash
+LIVE_TESTS=1 cargo test --test integration_test
+```
 
 ## Troubleshooting
 

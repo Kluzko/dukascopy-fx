@@ -9,7 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-_No changes yet._
+- `RequestParseMode` and `RateRequest::parse_with_mode(...)` for explicit input parsing semantics.
+- `get_rate_for_input_with_mode(...)` for one-shot strict request parsing + fetch.
+- Typed period support for ticker history via `Period` and `history_period(...)` methods.
+- Concurrency-tunable batch helpers:
+  - `download_with_concurrency(...)`
+  - `download_range_with_concurrency(...)`
+  - `download_incremental_with_concurrency(...)`
+- Client backtrack-horizon configuration:
+  - `DukascopyClientBuilder::max_at_or_before_backtrack_hours(...)`
+  - `DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS`
+  - `DEFAULT_DOWNLOAD_CONCURRENCY`
+
+### Changed
+
+- Internal cache payloads are now shared (`Arc<[u8]>`) to reduce clone pressure on cache hits.
+- Range fallback prefers previously resolved samples before triggering additional network lookups.
+- Integration tests are now opt-in at runtime (`LIVE_TESTS=1`) to reduce default CI/local flakiness.
+
+### Documentation
+
+- README updated with strict request parsing, typed periods, concurrency controls, and live test instructions.
 
 ## [0.4.1] - 2026-03-07
 
