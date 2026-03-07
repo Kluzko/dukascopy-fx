@@ -62,6 +62,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0] - 2026-03-07
 
+### Added
+
+- Interop adapter API for analytics pipelines:
+  - `FlatExchangeRow`
+  - `flatten_row(...)`
+  - `flatten_rows(...)`
+- New CLI global options:
+  - `--config PATH.toml` for command defaults
+  - `--json` for machine-readable summaries/errors
+- Public API snapshot contract test (`tests/public_api_snapshot_test.rs`).
+- Benchmark harness (`benches/core_benchmarks.rs`) and methodology docs.
+- CI workflow matrix (`stable`, `beta`, `MSRV`) with quality/supply-chain jobs.
+
 ### Fixed
 
 - Feature flags: `cargo check --no-default-features` now compiles correctly.
@@ -75,6 +88,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Batch download APIs now run with bounded concurrency while preserving input order.
 - Unified request parsing: recognized 6-letter FX shorthand (e.g. `EURUSD`) now resolves to explicit pair requests.
+- Client HTTP setup now uses no-proxy builder path for better headless/runtime portability.
+- `fx_fetcher` now supports config-driven defaults and JSON output mode for automation use cases.
+
+### Documentation
+
+- README redesigned for adoption (quickstart, copy-paste workflows, feature matrix, FAQ).
+- Added docs: API stability policy, CLI config reference, dataframe integrations, benchmark guide.
+- Added `RELEASE_NOTES.md` and `ROADMAP.md`.
 
 ## [0.4.0] - 2026-02-23
 
