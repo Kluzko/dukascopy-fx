@@ -6,4 +6,4 @@
 
 mod ticker;
 
-pub use ticker::{download, download_incremental, download_range, Ticker};
+pub use ticker::{download, download_incremental, download_range, Period, Ticker};

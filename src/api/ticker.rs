@@ -11,6 +11,81 @@ use std::str::FromStr;
 
 const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
 
+/// Typed period for historical queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Period {
+    Days(i64),
+    Weeks(i64),
+    Months(i64),
+    Years(i64),
+}
+
+impl Period {
+    pub fn to_duration(self) -> Result<Duration, DukascopyError> {
+        let (value, unit) = match self {
+            Self::Days(value) => (value, "d"),
+            Self::Weeks(value) => (value, "w"),
+            Self::Months(value) => (value, "mo"),
+            Self::Years(value) => (value, "y"),
+        };
+
+        if value <= 0 {
+            return Err(DukascopyError::InvalidRequest(
+                "Period must be positive".to_string(),
+            ));
+        }
+
+        Ok(match unit {
+            "d" => Duration::days(value),
+            "w" => Duration::weeks(value),
+            "mo" => Duration::days(value * 30),
+            "y" => Duration::days(value * 365),
+            _ => unreachable!("validated period unit"),
+        })
+    }
+}
+
+impl FromStr for Period {
+    type Err = DukascopyError;
+
+    fn from_str(period: &str) -> Result<Self, Self::Err> {
+        let period = period.trim().to_lowercase();
+
+        let (num_str, unit) = if period.ends_with("mo") {
+            (&period[..period.len() - 2], "mo")
+        } else if period.ends_with('d') {
+            (&period[..period.len() - 1], "d")
+        } else if period.ends_with('w') {
+            (&period[..period.len() - 1], "w")
+        } else if period.ends_with('y') {
+            (&period[..period.len() - 1], "y")
+        } else {
+            return Err(DukascopyError::InvalidRequest(format!(
+                "Invalid period format: '{}'. Use '1d', '1w', '1mo', '1y'",
+                period
+            )));
+        };
+
+        let num: i64 = num_str.parse().map_err(|_| {
+            DukascopyError::InvalidRequest(format!("Invalid period number in '{}'", period))
+        })?;
+
+        if num <= 0 {
+            return Err(DukascopyError::InvalidRequest(
+                "Period must be positive".to_string(),
+            ));
+        }
+
+        match unit {
+            "d" => Ok(Self::Days(num)),
+            "w" => Ok(Self::Weeks(num)),
+            "mo" => Ok(Self::Months(num)),
+            "y" => Ok(Self::Years(num)),
+            _ => unreachable!("validated period unit"),
+        }
+    }
+}
+
 /// A forex ticker for fetching exchange rate data.
 ///
 /// # Example
@@ -37,6 +112,14 @@ pub struct Ticker {
 }
 
 impl Ticker {
+    /// Creates a new ticker for a currency pair with validation.
+    pub fn try_new(from: &str, to: &str) -> Result<Self, DukascopyError> {
+        Ok(Self {
+            pair: CurrencyPair::try_new(from, to)?,
+            interval: Duration::hours(1),
+        })
+    }
+
     /// Creates a new ticker for a currency pair.
     #[inline]
     pub fn new(from: &str, to: &str) -> Self {
@@ -118,6 +201,15 @@ impl Ticker {
         self.history_from_end(period, end).await
     }
 
+    /// Fetches historical data using typed period.
+    pub async fn history_period(
+        &self,
+        period: Period,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let end = Utc::now() - Duration::hours(1);
+        self.history_period_from_end(period, end).await
+    }
+
     /// Fetches historical data for a time period using a configured client.
     pub async fn history_with_client(
         &self,
@@ -134,8 +226,17 @@ impl Ticker {
         period: &str,
         end: DateTime<Utc>,
     ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
-        let duration = parse_period(period)?;
-        let start = end - duration;
+        let start = end - parse_period(period)?;
+        self.history_range(start, end).await
+    }
+
+    /// Fetches historical data for a typed period ending at a specific timestamp.
+    pub async fn history_period_from_end(
+        &self,
+        period: Period,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let start = end - period.to_duration()?;
         self.history_range(start, end).await
     }
 
@@ -146,8 +247,20 @@ impl Ticker {
         period: &str,
         end: DateTime<Utc>,
     ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
-        let duration = parse_period(period)?;
-        let start = end - duration;
+        let start = end - parse_period(period)?;
+        client
+            .get_exchange_rates_range(&self.pair, start, end, self.interval)
+            .await
+    }
+
+    /// Fetches historical data for a typed period ending at a specific timestamp using a configured client.
+    pub async fn history_period_from_end_with_client(
+        &self,
+        client: &ConfiguredClient,
+        period: Period,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let start = end - period.to_duration()?;
         client
             .get_exchange_rates_range(&self.pair, start, end, self.interval)
             .await
@@ -327,47 +440,7 @@ impl FromStr for Ticker {
 // ============================================================================
 
 fn parse_period(period: &str) -> Result<Duration, DukascopyError> {
-    let period = period.trim().to_lowercase();
-
-    let (num_str, unit) = if period.ends_with("mo") {
-        (&period[..period.len() - 2], "mo")
-    } else if period.ends_with('d') {
-        (&period[..period.len() - 1], "d")
-    } else if period.ends_with('w') {
-        (&period[..period.len() - 1], "w")
-    } else if period.ends_with('y') {
-        (&period[..period.len() - 1], "y")
-    } else {
-        return Err(DukascopyError::InvalidRequest(format!(
-            "Invalid period format: '{}'. Use '1d', '1w', '1mo', '1y'",
-            period
-        )));
-    };
-
-    let num: i64 = num_str.parse().map_err(|_| {
-        DukascopyError::InvalidRequest(format!("Invalid period number in '{}'", period))
-    })?;
-
-    if num <= 0 {
-        return Err(DukascopyError::InvalidRequest(
-            "Period must be positive".to_string(),
-        ));
-    }
-
-    let duration = match unit {
-        "d" => Duration::days(num),
-        "w" => Duration::weeks(num),
-        "mo" => Duration::days(num * 30),
-        "y" => Duration::days(num * 365),
-        _ => {
-            return Err(DukascopyError::InvalidRequest(format!(
-                "Invalid period format: '{}'. Use '1d', '1w', '1mo', '1y'",
-                period
-            )))
-        }
-    };
-
-    Ok(duration)
+    Period::from_str(period)?.to_duration()
 }
 
 // ============================================================================
@@ -570,9 +643,38 @@ mod tests {
     }
 
     #[test]
+    fn test_period_from_str() {
+        assert_eq!(Period::from_str("1d").unwrap(), Period::Days(1));
+        assert_eq!(Period::from_str("2w").unwrap(), Period::Weeks(2));
+        assert_eq!(Period::from_str("3mo").unwrap(), Period::Months(3));
+        assert_eq!(Period::from_str("1y").unwrap(), Period::Years(1));
+    }
+
+    #[test]
+    fn test_period_from_str_invalid() {
+        assert!(Period::from_str("bad").is_err());
+        assert!(Period::from_str("0d").is_err());
+        assert!(Period::from_str("-1d").is_err());
+        assert!(Period::Days(0).to_duration().is_err());
+        assert!(Period::Weeks(-1).to_duration().is_err());
+    }
+
+    #[test]
     fn test_ticker_interval() {
         let ticker = Ticker::new("EUR", "USD").interval(Duration::minutes(30));
         assert_eq!(ticker.interval, Duration::minutes(30));
+    }
+
+    #[test]
+    fn test_ticker_try_new_validates_input() {
+        let ticker = Ticker::try_new("eur", "usd").unwrap();
+        assert_eq!(ticker.symbol(), "EURUSD");
+
+        let err = Ticker::try_new("BAD$", "USD").unwrap_err();
+        assert!(matches!(
+            err,
+            DukascopyError::InvalidCurrencyCode { code, .. } if code == "BAD$"
+        ));
     }
 
     #[test]
@@ -698,6 +800,14 @@ mod tests {
         let ticker = Ticker::new("EUR", "USD");
         let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
         let result = ticker.history_from_end("bad", end).await;
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_history_period_from_end_rejects_non_positive_period_without_network_call() {
+        let ticker = Ticker::new("EUR", "USD");
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
+        let result = ticker.history_period_from_end(Period::Days(0), end).await;
         assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
     }
 
