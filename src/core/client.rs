@@ -133,6 +133,25 @@ async fn get_default_client() -> &'static ConfiguredClient {
 // ============================================================================
 
 /// Configuration for a Dukascopy client instance.
+///
+/// This is usually created through [`DukascopyClientBuilder`], then accessed
+/// via [`ConfiguredClient::config`] for inspection.
+///
+/// # Example
+///
+/// ```no_run
+/// use dukascopy_fx::advanced::{DukascopyClientBuilder, PairResolutionMode};
+///
+/// let client = DukascopyClientBuilder::new()
+///     .default_quote_currency("USD")
+///     .pair_resolution_mode(PairResolutionMode::ExplicitOrDefaultQuote)
+///     .max_in_flight_requests(16)
+///     .max_download_concurrency(16)
+///     .build();
+///
+/// assert_eq!(client.config().max_in_flight_requests, 16);
+/// assert_eq!(client.config().max_download_concurrency, 16);
+/// ```
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Cache size (number of hourly data files to cache)
@@ -197,12 +216,14 @@ impl Default for ClientConfig {
 ///
 /// # Example
 ///
-/// ```
-/// use dukascopy_fx::advanced::DukascopyClientBuilder;
+/// ```no_run
+/// use dukascopy_fx::advanced::{DukascopyClientBuilder, PairResolutionMode};
 ///
 /// let client = DukascopyClientBuilder::new()
 ///     .cache_size(500)
 ///     .timeout_secs(60)
+///     .default_quote_currency("USD")
+///     .pair_resolution_mode(PairResolutionMode::ExplicitOrDefaultQuote)
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]

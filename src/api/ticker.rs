@@ -13,15 +13,37 @@ use std::str::FromStr;
 pub const DEFAULT_DOWNLOAD_CONCURRENCY: usize = DEFAULT_MAX_DOWNLOAD_CONCURRENCY;
 
 /// Typed period for historical queries.
+///
+/// Prefer this over raw strings when you want compile-time discoverability.
+///
+/// # Example
+///
+/// ```no_run
+/// use dukascopy_fx::{Period, Ticker};
+///
+/// # async fn example() -> dukascopy_fx::Result<()> {
+/// let ticker = Ticker::try_new("EUR", "USD")?;
+/// let rows = ticker.history_period(Period::Weeks(2)).await?;
+/// println!("rows={}", rows.len());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Period {
+    /// N calendar days.
     Days(i64),
+    /// N weeks (7-day buckets).
     Weeks(i64),
+    /// N months as 30-day blocks.
     Months(i64),
+    /// N years as 365-day blocks.
     Years(i64),
 }
 
 impl Period {
+    /// Converts typed period into internal `chrono::Duration`.
+    ///
+    /// Returns validation error for non-positive values.
     pub fn to_duration(self) -> Result<Duration, DukascopyError> {
         let (value, unit) = match self {
             Self::Days(value) => (value, "d"),
@@ -87,7 +109,10 @@ impl FromStr for Period {
     }
 }
 
-/// A forex ticker for fetching exchange rate data.
+/// A ticker handle for fetching instrument rate data.
+///
+/// `Ticker` is intentionally cheap to clone and keeps only pair + interval
+/// configuration. Network state lives in the underlying client.
 ///
 /// # Example
 ///
@@ -95,7 +120,7 @@ impl FromStr for Period {
 /// use dukascopy_fx::Ticker;
 ///
 /// # async fn example() -> dukascopy_fx::Result<()> {
-/// let ticker = Ticker::new("EUR", "USD");
+/// let ticker = Ticker::try_new("EUR", "USD")?;
 ///
 /// // Get recent rate
 /// let rate = ticker.rate().await?;
@@ -142,7 +167,22 @@ impl Ticker {
         })
     }
 
-    /// Sets the data interval for historical queries.
+    /// Sets the sampling interval for history/range queries.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use dukascopy_fx::{Ticker, time::Duration};
+    ///
+    /// # async fn example() -> dukascopy_fx::Result<()> {
+    /// let rows = Ticker::try_new("EUR", "USD")?
+    ///     .interval(Duration::minutes(30))
+    ///     .history("1d")
+    ///     .await?;
+    /// println!("rows={}", rows.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
@@ -206,6 +246,20 @@ impl Ticker {
     }
 
     /// Fetches historical data using typed period.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use dukascopy_fx::{Period, Ticker};
+    ///
+    /// # async fn example() -> dukascopy_fx::Result<()> {
+    /// let rows = Ticker::try_new("XAU", "USD")?
+    ///     .history_period(Period::Months(1))
+    ///     .await?;
+    /// println!("rows={}", rows.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn history_period(
         &self,
         period: Period,

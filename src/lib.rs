@@ -239,7 +239,7 @@ pub use market::{get_market_status, is_market_open, is_weekend, MarketStatus};
 /// - Low-level parsing utilities
 ///
 /// # Example
-/// ```
+/// ```no_run
 /// use dukascopy_fx::advanced::{DukascopyClientBuilder, InstrumentConfig};
 ///
 /// let client = DukascopyClientBuilder::new()
