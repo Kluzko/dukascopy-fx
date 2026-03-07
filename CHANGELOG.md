@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No changes yet._
 
+## [0.4.1] - 2026-03-07
+
+### Fixed
+
+- Feature flags: `cargo check --no-default-features` now compiles correctly.
+- Tick selection now enforces strict at-or-before semantics (no look-ahead), with bounded backward fallback.
+- Range/history retrieval fallback improved for sparse-hour data.
+- Storage sinks now return explicit conversion errors instead of silently writing `0.0`.
+- Checkpoint file replacement hardened for filesystems where rename-over-existing can fail.
+- Integration tests now run serialized to reduce flaky network failures under parallel load.
+
+### Changed
+
+- Batch download APIs now run with bounded concurrency while preserving input order.
+- Unified request parsing: recognized 6-letter FX shorthand (e.g. `EURUSD`) now resolves to explicit pair requests.
+
 ## [0.4.0] - 2026-02-23
 
 ### Added

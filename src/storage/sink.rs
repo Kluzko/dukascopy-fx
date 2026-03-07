@@ -66,24 +66,27 @@ struct SinkRow {
     ask_volume: f32,
 }
 
-fn decimal_to_f64(value: &rust_decimal::Decimal) -> f64 {
-    value
-        .to_f64()
-        .unwrap_or_else(|| value.to_string().parse::<f64>().unwrap_or(0.0))
+fn decimal_to_f64(value: &rust_decimal::Decimal) -> Result<f64, DukascopyError> {
+    value.to_f64().ok_or_else(|| {
+        DukascopyError::InvalidRequest(format!(
+            "Decimal value '{}' cannot be represented as f64",
+            value
+        ))
+    })
 }
 
-fn to_sink_row(symbol: &str, row: &CurrencyExchange) -> SinkRow {
-    SinkRow {
+fn to_sink_row(symbol: &str, row: &CurrencyExchange) -> Result<SinkRow, DukascopyError> {
+    Ok(SinkRow {
         symbol: symbol.to_string(),
         base: row.pair.from().to_string(),
         quote: row.pair.to().to_string(),
         timestamp_ms: row.timestamp.timestamp_millis(),
-        rate: decimal_to_f64(&row.rate),
-        bid: decimal_to_f64(&row.bid),
-        ask: decimal_to_f64(&row.ask),
+        rate: decimal_to_f64(&row.rate)?,
+        bid: decimal_to_f64(&row.bid)?,
+        ask: decimal_to_f64(&row.ask)?,
         bid_volume: row.bid_volume,
         ask_volume: row.ask_volume,
-    }
+    })
 }
 
 /// Parquet sink for fetched rows.
@@ -433,7 +436,7 @@ impl DataSink for ParquetSink {
     ) -> Result<usize, DukascopyError> {
         self.rows.reserve(rows.len());
         for row in rows {
-            self.rows.push(to_sink_row(symbol, row));
+            self.rows.push(to_sink_row(symbol, row)?);
         }
 
         if self.rows.len() >= self.flush_rows_threshold {
@@ -593,10 +596,8 @@ mod tests {
         );
         let path = std::env::temp_dir().join(unique);
 
-        let legacy_rows = vec![to_sink_row(
-            "EURUSD",
-            &sample_exchange("EUR", "USD", 12, "1.10000"),
-        )];
+        let legacy_rows =
+            vec![to_sink_row("EURUSD", &sample_exchange("EUR", "USD", 12, "1.10000")).unwrap()];
         ParquetSink::write_rows_to_parquet(&path, &legacy_rows).unwrap();
 
         let mut sink = ParquetSink::open(&path).unwrap();

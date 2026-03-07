@@ -1,6 +1,8 @@
 //! Data models for currency pairs and exchange rates.
 
-use crate::core::instrument::{resolve_instrument_config, HasInstrumentConfig, InstrumentConfig};
+use crate::core::instrument::{
+    resolve_instrument_config, CurrencyCategory, HasInstrumentConfig, InstrumentConfig,
+};
 use crate::error::DukascopyError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -92,7 +94,8 @@ impl FromStr for RateRequest {
     ///
     /// Rules:
     /// - input containing `/` is parsed as explicit pair, e.g. `EUR/USD`
-    /// - otherwise input is parsed as symbol, e.g. `AAPL`, `EURUSD`, `USA500IDX`
+    /// - 6-letter FX shorthand (e.g. `EURUSD`, `XAUUSD`) is parsed as pair
+    /// - otherwise input is parsed as symbol, e.g. `AAPL`, `USA500IDX`
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let normalized = input.trim();
         if normalized.is_empty() {
@@ -105,8 +108,28 @@ impl FromStr for RateRequest {
             return Ok(Self::Pair(CurrencyPair::from_str(normalized)?));
         }
 
+        if is_likely_forex_pair_shorthand(normalized) {
+            return Ok(Self::Pair(CurrencyPair::try_new(
+                &normalized[0..3],
+                &normalized[3..6],
+            )?));
+        }
+
         Self::symbol(normalized)
     }
+}
+
+fn is_likely_forex_pair_shorthand(input: &str) -> bool {
+    let normalized = input.trim().to_ascii_uppercase();
+    if normalized.len() != 6 || !normalized.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    let from = &normalized[0..3];
+    let to = &normalized[3..6];
+
+    !matches!(CurrencyCategory::from_code(from), CurrencyCategory::Unknown)
+        && !matches!(CurrencyCategory::from_code(to), CurrencyCategory::Unknown)
 }
 
 impl CurrencyPair {
@@ -514,9 +537,17 @@ mod tests {
         }
 
         #[test]
-        fn test_parse_symbol_like_forex_without_slash() {
+        fn test_parse_forex_shorthand_without_slash() {
             let request: RateRequest = "eurusd".parse().unwrap();
-            assert_eq!(request.as_symbol(), Some("EURUSD"));
+            let pair = request.as_pair().unwrap();
+            assert_eq!(pair.from(), "EUR");
+            assert_eq!(pair.to(), "USD");
+        }
+
+        #[test]
+        fn test_parse_non_fx_six_char_code_as_symbol() {
+            let request: RateRequest = "aaplus".parse().unwrap();
+            assert_eq!(request.as_symbol(), Some("AAPLUS"));
         }
 
         #[test]

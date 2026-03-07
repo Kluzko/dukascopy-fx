@@ -88,13 +88,34 @@ impl FileCheckpointStore {
             ))
         })?;
 
-        fs::rename(&temp_path, &self.path).map_err(|err| {
-            DukascopyError::Unknown(format!(
-                "Failed to replace checkpoint file '{}': {}",
-                self.path.display(),
-                err
-            ))
-        })?;
+        if let Err(err) = fs::rename(&temp_path, &self.path) {
+            // Some platforms/filesystems fail renaming over an existing destination.
+            // Retry by removing destination first.
+            if self.path.exists() {
+                fs::remove_file(&self.path).map_err(|remove_err| {
+                    DukascopyError::Unknown(format!(
+                        "Failed to remove existing checkpoint file '{}' after rename error '{}': {}",
+                        self.path.display(),
+                        err,
+                        remove_err
+                    ))
+                })?;
+
+                fs::rename(&temp_path, &self.path).map_err(|retry_err| {
+                    DukascopyError::Unknown(format!(
+                        "Failed to replace checkpoint file '{}' after retry: {}",
+                        self.path.display(),
+                        retry_err
+                    ))
+                })?;
+            } else {
+                return Err(DukascopyError::Unknown(format!(
+                    "Failed to replace checkpoint file '{}': {}",
+                    self.path.display(),
+                    err
+                )));
+            }
+        }
 
         Ok(())
     }

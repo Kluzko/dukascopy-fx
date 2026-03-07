@@ -22,7 +22,7 @@ CLI tooling exists, but is secondary.
 
 ```toml
 [dependencies]
-dukascopy-fx = "0.4.0"
+dukascopy-fx = "0.4.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -67,6 +67,7 @@ let msft = get_rate_for_request(&req, now()).await?;
 
 Parsing rules:
 - input containing `/` -> explicit pair
+- 6-letter FX shorthand (e.g. `EURUSD`, `XAUUSD`) -> explicit pair
 - other input -> single symbol
 
 ### 2) Ticker API
@@ -129,7 +130,7 @@ let rows = ticker.fetch_incremental(&store, Duration::days(7)).await?;
 println!("fetched {} rows", rows.len());
 ```
 
-## Public API (0.4.0)
+## Public API (0.4.1)
 
 Most-used free functions:
 - `get_rate(from, to, timestamp)`

@@ -143,7 +143,8 @@ pub async fn get_rate_for_request(
 ///
 /// Parsing rules:
 /// - input containing `/` is parsed as pair (e.g. `EUR/USD`)
-/// - otherwise input is parsed as symbol (e.g. `AAPL`, `EURUSD`)
+/// - 6-letter FX shorthand (e.g. `EURUSD`, `XAUUSD`) is parsed as pair
+/// - otherwise input is parsed as symbol (e.g. `AAPL`, `USA500IDX`)
 #[inline]
 pub async fn get_rate_for_input(input: &str, timestamp: DateTime<Utc>) -> Result<CurrencyExchange> {
     let request: RateRequest = input.parse()?;

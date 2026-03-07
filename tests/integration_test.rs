@@ -10,6 +10,7 @@ use chrono::{Datelike, Duration, TimeZone, Timelike, Utc};
 use dukascopy_fx::advanced::{ConversionMode, DukascopyClientBuilder, PairResolutionMode};
 use dukascopy_fx::{CurrencyPair, DukascopyError, RateRequest, Ticker};
 use serde::Deserialize;
+use serial_test::serial;
 
 #[derive(Debug, Deserialize)]
 struct StooqDailyRow {
@@ -53,6 +54,7 @@ fn relative_diff(left: f64, right: f64) -> f64 {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_get_rate_usd_pln() {
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
 
@@ -75,6 +77,7 @@ async fn test_get_rate_usd_pln() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_get_rate_eur_usd() {
     let pair = CurrencyPair::new("EUR", "USD");
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
@@ -106,6 +109,7 @@ async fn test_get_rate_eur_usd() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_get_rate_aapl_usd_supports_market_instrument_path() {
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
     let result = dukascopy_fx::get_rate("AAPL", "USD", timestamp).await;
@@ -126,6 +130,7 @@ async fn test_get_rate_aapl_usd_supports_market_instrument_path() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_get_rate_for_input_supports_explicit_pair() {
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
     let result = dukascopy_fx::get_rate_for_input("EUR/USD", timestamp).await;
@@ -138,6 +143,7 @@ async fn test_get_rate_for_input_supports_explicit_pair() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_get_rate_for_request_supports_single_symbol() {
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
     let request = RateRequest::symbol("AAPL").unwrap();
@@ -168,6 +174,7 @@ async fn test_get_rate_for_request_supports_single_symbol() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_client_default_quote_symbol_request_matches_explicit_pair() {
     let client = DukascopyClientBuilder::new()
         .default_quote_currency("PLN")
@@ -202,6 +209,7 @@ async fn test_client_default_quote_symbol_request_matches_explicit_pair() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_jpy_pair_correct_divisor() {
     // JPY pairs use divisor 1000 (3 decimal places)
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
@@ -225,6 +233,7 @@ async fn test_jpy_pair_correct_divisor() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_gold_correct_divisor() {
     // Gold (XAU/USD) uses divisor 1000 (3 decimal places)
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
@@ -248,6 +257,7 @@ async fn test_gold_correct_divisor() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_silver_correct_divisor() {
     // Silver (XAG/USD) uses divisor 1000
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
@@ -271,6 +281,7 @@ async fn test_silver_correct_divisor() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_standard_pair_correct_divisor() {
     // Standard pairs (EUR/USD) use divisor 100000 (5 decimal places)
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
@@ -294,6 +305,7 @@ async fn test_standard_pair_correct_divisor() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_cross_source_metals_close_is_reasonably_close_to_stooq() {
     let date = "2025-01-10";
 
@@ -336,6 +348,7 @@ async fn test_cross_source_metals_close_is_reasonably_close_to_stooq() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_cross_source_indices_close_is_reasonably_close_to_stooq() {
     let date = "2025-01-10";
 
@@ -379,6 +392,7 @@ async fn test_cross_source_indices_close_is_reasonably_close_to_stooq() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_cross_source_us_stock_close_is_reasonably_close_to_stooq() {
     let date = "2025-01-10";
     let ts = Utc.with_ymd_and_hms(2025, 1, 10, 20, 59, 0).unwrap();
@@ -403,6 +417,7 @@ async fn test_cross_source_us_stock_close_is_reasonably_close_to_stooq() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_cross_source_additional_indices_close_is_reasonably_close_to_stooq() {
     let date = "2025-01-10";
     let usa_tech_ts = Utc.with_ymd_and_hms(2025, 1, 10, 20, 59, 0).unwrap();
@@ -449,6 +464,7 @@ async fn test_cross_source_additional_indices_close_is_reasonably_close_to_stooq
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_ticker_rate_at() {
     let ticker = Ticker::new("EUR", "USD");
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
@@ -462,6 +478,7 @@ async fn test_ticker_rate_at() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_ticker_convenience_constructors() {
     let timestamp = Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap();
 
@@ -482,6 +499,7 @@ async fn test_ticker_convenience_constructors() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_ticker_history_range() {
     let ticker = Ticker::new("EUR", "USD");
     let end = Utc.with_ymd_and_hms(2025, 1, 3, 14, 0, 0).unwrap();
@@ -508,6 +526,7 @@ async fn test_ticker_history_range() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_ticker_parse() {
     let ticker: Ticker = "EUR/USD".parse().unwrap();
     assert_eq!(ticker.symbol(), "EURUSD");
@@ -524,6 +543,7 @@ async fn test_ticker_parse() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_currency_pair_parsing() {
     let pair1: CurrencyPair = "EUR/USD".parse().unwrap();
     assert_eq!(pair1.from(), "EUR");
@@ -539,6 +559,7 @@ async fn test_currency_pair_parsing() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_currency_pair_invalid() {
     assert!("E/USD".parse::<CurrencyPair>().is_err()); // Too short
     assert!("TOO_LONG_INSTRUMENT/USD".parse::<CurrencyPair>().is_err()); // Too long
@@ -550,6 +571,7 @@ async fn test_currency_pair_invalid() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_market_hours() {
     // Saturday - market closed
     let saturday = Utc.with_ymd_and_hms(2025, 1, 4, 12, 0, 0).unwrap();
@@ -571,6 +593,7 @@ async fn test_market_hours() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_weekend_data_returns_friday() {
     // Request data for Saturday - should return Friday's last data
     let saturday = Utc.with_ymd_and_hms(2025, 1, 4, 12, 0, 0).unwrap();
@@ -593,6 +616,7 @@ async fn test_weekend_data_returns_friday() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_friday_after_close_returns_last_tick() {
     // Friday after close should map to the last available Friday tick
     let friday_after_close = Utc.with_ymd_and_hms(2025, 1, 3, 22, 30, 0).unwrap();
@@ -614,6 +638,7 @@ async fn test_friday_after_close_returns_last_tick() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_get_rates_range() {
     let end = Utc.with_ymd_and_hms(2025, 1, 3, 14, 0, 0).unwrap();
     let start = end - Duration::hours(3);
@@ -636,6 +661,7 @@ async fn test_get_rates_range() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_get_rates_range_rejects_non_positive_interval() {
     let end = Utc.with_ymd_and_hms(2025, 1, 3, 14, 0, 0).unwrap();
     let start = end - Duration::hours(3);
@@ -649,6 +675,7 @@ async fn test_get_rates_range_rejects_non_positive_interval() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_invalid_currency_code() {
     let result = CurrencyPair::try_new("E", "USD");
     assert!(result.is_err());
@@ -659,6 +686,7 @@ async fn test_invalid_currency_code() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_future_date_no_data() {
     // Far future date - no data should exist
     let future = Utc.with_ymd_and_hms(2030, 1, 1, 12, 0, 0).unwrap();

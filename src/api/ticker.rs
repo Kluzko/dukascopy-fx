@@ -6,7 +6,10 @@ use crate::market::last_available_tick_time;
 use crate::models::{CurrencyExchange, CurrencyPair};
 use crate::storage::checkpoint::CheckpointStore;
 use chrono::{DateTime, Duration, Utc};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use std::str::FromStr;
+
+const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
 
 /// A forex ticker for fetching exchange rate data.
 ///
@@ -376,12 +379,29 @@ pub async fn download(
     tickers: &[Ticker],
     period: &str,
 ) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
-    let mut results = Vec::with_capacity(tickers.len());
-    for ticker in tickers {
-        let history = ticker.history(period).await?;
-        results.push((ticker.clone(), history));
+    if tickers.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(results)
+
+    let concurrency = tickers.len().clamp(1, DEFAULT_DOWNLOAD_CONCURRENCY);
+    let period = period.to_string();
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> =
+        stream::iter(tickers.iter().cloned().enumerate().map(|(index, ticker)| {
+            let period = period.clone();
+            async move {
+                let history = ticker.history(&period).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }
+        }))
+        .buffer_unordered(concurrency)
+        .try_collect()
+        .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
 }
 
 /// Downloads historical data with custom date range.
@@ -390,12 +410,30 @@ pub async fn download_range(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
-    let mut results = Vec::with_capacity(tickers.len());
-    for ticker in tickers {
-        let history = ticker.history_range(start, end).await?;
-        results.push((ticker.clone(), history));
+    if tickers.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(results)
+
+    let concurrency = tickers.len().clamp(1, DEFAULT_DOWNLOAD_CONCURRENCY);
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
+        tickers
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, ticker)| async move {
+                let history = ticker.history_range(start, end).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }),
+    )
+    .buffer_unordered(concurrency)
+    .try_collect()
+    .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
 }
 
 /// Incrementally downloads data for multiple tickers using checkpoint store.
@@ -404,12 +442,30 @@ pub async fn download_incremental<S: CheckpointStore>(
     store: &S,
     lookback: Duration,
 ) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
-    let mut results = Vec::with_capacity(tickers.len());
-    for ticker in tickers {
-        let history = ticker.fetch_incremental(store, lookback).await?;
-        results.push((ticker.clone(), history));
+    if tickers.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(results)
+
+    let concurrency = tickers.len().clamp(1, DEFAULT_DOWNLOAD_CONCURRENCY);
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
+        tickers
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, ticker)| async move {
+                let history = ticker.fetch_incremental(store, lookback).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }),
+    )
+    .buffer_unordered(concurrency)
+    .try_collect()
+    .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
 }
 
 fn deduplicate_by_timestamp(mut history: Vec<CurrencyExchange>) -> Vec<CurrencyExchange> {
@@ -643,5 +699,28 @@ mod tests {
         let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
         let result = ticker.history_from_end("bad", end).await;
         assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_download_empty_returns_empty_without_network_call() {
+        let result = download(&[], "1d").await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_range_empty_returns_empty_without_network_call() {
+        let start = Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 1, 0, 0).unwrap();
+        let result = download_range(&[], start, end).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_incremental_empty_returns_empty_without_network_call() {
+        let store = InMemoryCheckpointStore::default();
+        let result = download_incremental(&[], &store, Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(result.is_empty());
     }
 }

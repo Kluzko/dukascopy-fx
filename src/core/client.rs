@@ -7,6 +7,7 @@ use crate::market::{is_market_open, last_available_tick_time};
 use crate::models::{CurrencyExchange, CurrencyPair, RateRequest};
 
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+#[cfg(feature = "logging")]
 use log::{debug, info, warn};
 use lru::LruCache;
 use reqwest::Client;
@@ -18,6 +19,27 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use tokio::sync::{OnceCell, Semaphore};
+
+#[cfg(not(feature = "logging"))]
+macro_rules! debug {
+    ($($arg:tt)*) => {{
+        let _ = format_args!($($arg)*);
+    }};
+}
+
+#[cfg(not(feature = "logging"))]
+macro_rules! info {
+    ($($arg:tt)*) => {{
+        let _ = format_args!($($arg)*);
+    }};
+}
+
+#[cfg(not(feature = "logging"))]
+macro_rules! warn {
+    ($($arg:tt)*) => {{
+        let _ = format_args!($($arg)*);
+    }};
+}
 
 // ============================================================================
 // Constants
@@ -40,6 +62,9 @@ pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 200;
 
 /// Default maximum number of in-flight HTTP requests per client
 pub const DEFAULT_MAX_IN_FLIGHT_REQUESTS: usize = 8;
+
+/// Maximum number of hours to backtrack when resolving at-or-before tick.
+const MAX_AT_OR_BEFORE_BACKTRACK_HOURS: usize = 72;
 
 /// Dukascopy API base URL
 pub const DUKASCOPY_BASE_URL: &str = "https://datafeed.dukascopy.com/datafeed";
@@ -336,17 +361,25 @@ impl DukascopyClientBuilder {
         let config = self.config;
         let cache_size = config.cache_size.max(1);
         let max_in_flight_requests = config.max_in_flight_requests.max(1);
-        let cache = Arc::new(Mutex::new(LruCache::new(
-            NonZeroUsize::new(cache_size).expect("Cache size must be non-zero"),
-        )));
+        let cache_capacity = NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::MIN);
+        let cache = Arc::new(Mutex::new(LruCache::new(cache_capacity)));
 
-        let http_client = Client::builder()
+        let http_client = match Client::builder()
             .pool_max_idle_per_host(config.max_idle_connections)
             .tcp_nodelay(true)
             .pool_idle_timeout(None)
             .timeout(StdDuration::from_secs(config.timeout_secs))
             .build()
-            .expect("Failed to create HTTP client");
+        {
+            Ok(client) => client,
+            Err(err) => {
+                warn!(
+                    "Failed to create custom HTTP client config (falling back to reqwest::Client::new()): {}",
+                    err
+                );
+                Client::new()
+            }
+        };
 
         ConfiguredClient {
             config,
@@ -427,22 +460,55 @@ impl ConfiguredClient {
             timestamp
         };
 
-        let url = self.build_url(
-            &resolved_pair.as_symbol(),
-            effective_timestamp.year(),
-            effective_timestamp.month(),
-            effective_timestamp.day(),
-            effective_timestamp.hour(),
-        );
-
-        let data = self.fetch_cached(&url).await?;
-        DukascopyParser::validate_decompressed_data(&data)?;
-
-        let target_ms = DukascopyClient::timestamp_to_ms_from_hour(effective_timestamp);
         let config = self.get_instrument_config(resolved_pair.from(), resolved_pair.to());
-        let tick = DukascopyClient::find_tick_at_or_before(&data, target_ms, config)?;
+        let mut query_timestamp = effective_timestamp;
+        let mut fallback_attempts = 0usize;
 
-        DukascopyClient::build_exchange_response(pair, effective_timestamp, tick, config)
+        loop {
+            let hour_start = DukascopyClient::hour_start(query_timestamp)?;
+            let url = self.build_url(
+                &resolved_pair.as_symbol(),
+                hour_start.year(),
+                hour_start.month(),
+                hour_start.day(),
+                hour_start.hour(),
+            );
+
+            let data = match self.fetch_cached(&url).await {
+                Ok(data) => data,
+                Err(DukascopyError::DataNotFound) if fallback_attempts > 0 => {
+                    if fallback_attempts >= MAX_AT_OR_BEFORE_BACKTRACK_HOURS {
+                        return Err(DukascopyError::DataNotFound);
+                    }
+                    query_timestamp = hour_start
+                        .checked_sub_signed(Duration::milliseconds(1))
+                        .ok_or(DukascopyError::DataNotFound)?;
+                    fallback_attempts += 1;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            DukascopyParser::validate_decompressed_data(&data)?;
+
+            let target_ms = DukascopyClient::timestamp_to_ms_from_hour(query_timestamp);
+            match DukascopyClient::find_tick_at_or_before(&data, target_ms, config) {
+                Ok(tick) => {
+                    return DukascopyClient::build_exchange_response(
+                        pair, hour_start, tick, config,
+                    );
+                }
+                Err(DukascopyError::DataNotFound) => {
+                    if fallback_attempts >= MAX_AT_OR_BEFORE_BACKTRACK_HOURS {
+                        return Err(DukascopyError::DataNotFound);
+                    }
+                    query_timestamp = hour_start
+                        .checked_sub_signed(Duration::milliseconds(1))
+                        .ok_or(DukascopyError::DataNotFound)?;
+                    fallback_attempts += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     /// Fetches exchange rate for unified request type (pair or symbol).
@@ -701,7 +767,7 @@ impl ConfiguredClient {
             }
 
             let target_ms = DukascopyClient::timestamp_to_ms_from_hour(current);
-            let exchange = match hour_cache.as_ref() {
+            let mut exchange = match hour_cache.as_ref() {
                 Some((_, ticks)) => {
                     if let Some(tick) =
                         DukascopyClient::find_tick_at_or_before_parsed(ticks, target_ms)
@@ -715,6 +781,17 @@ impl ConfiguredClient {
                 }
                 None => None,
             };
+
+            if exchange.is_none() {
+                let fallback_ts = current
+                    .checked_sub_signed(Duration::milliseconds(1))
+                    .ok_or(DukascopyError::DataNotFound)?;
+                exchange = match self.get_exchange_rate(pair, fallback_ts).await {
+                    Ok(value) => Some(value),
+                    Err(DukascopyError::DataNotFound) => None,
+                    Err(err) => return Err(err),
+                };
+            }
 
             if let Some(exchange) = exchange {
                 let duplicate_ts = results
@@ -795,7 +872,7 @@ impl ConfiguredClient {
                     match response.bytes().await {
                         Ok(bytes) => break bytes,
                         Err(err) => {
-                            let error = DukascopyError::from(err);
+                            let error = self.map_reqwest_error(err);
                             if error.is_retryable() && attempt < self.config.max_retries {
                                 let delay_ms =
                                     retry_delay_ms(self.config.retry_base_delay_ms, attempt);
@@ -816,7 +893,7 @@ impl ConfiguredClient {
                     }
                 }
                 Err(err) => {
-                    let error = DukascopyError::from(err);
+                    let error = self.map_reqwest_error(err);
                     if error.is_retryable() && attempt < self.config.max_retries {
                         let delay_ms = retry_delay_ms(self.config.retry_base_delay_ms, attempt);
                         warn!(
@@ -865,6 +942,16 @@ impl ConfiguredClient {
         }
 
         Ok(decompressed)
+    }
+
+    fn map_reqwest_error(&self, err: reqwest::Error) -> DukascopyError {
+        if err.is_timeout() {
+            DukascopyError::Timeout(self.config.timeout_secs)
+        } else if err.is_connect() {
+            DukascopyError::HttpError(format!("Connection failed: {}", err))
+        } else {
+            DukascopyError::HttpError(err.to_string())
+        }
     }
 
     /// Clears the cache.
@@ -1015,14 +1102,9 @@ impl DukascopyClient {
         config: InstrumentConfig,
     ) -> Result<ParsedTick, DukascopyError> {
         let mut best_tick: Option<ParsedTick> = None;
-        let mut first_tick: Option<ParsedTick> = None;
 
         for chunk in data.chunks_exact(TICK_SIZE_BYTES) {
             let tick = DukascopyParser::parse_tick_with_config(chunk, config)?;
-
-            if first_tick.is_none() {
-                first_tick = Some(tick);
-            }
 
             if tick.ms_from_hour <= target_ms {
                 best_tick = Some(tick);
@@ -1031,7 +1113,7 @@ impl DukascopyClient {
             }
         }
 
-        best_tick.or(first_tick).ok_or(DukascopyError::DataNotFound)
+        best_tick.ok_or(DukascopyError::DataNotFound)
     }
 
     fn find_tick_at_or_before_parsed(ticks: &[ParsedTick], target_ms: u32) -> Option<ParsedTick> {
@@ -1041,7 +1123,7 @@ impl DukascopyClient {
 
         match ticks.binary_search_by_key(&target_ms, |tick| tick.ms_from_hour) {
             Ok(index) => Some(ticks[index]),
-            Err(0) => Some(ticks[0]),
+            Err(0) => None,
             Err(index) => Some(ticks[index - 1]),
         }
     }
@@ -1138,6 +1220,7 @@ fn build_tick_url(
     day: u32,
     hour: u32,
 ) -> String {
+    let month = month.clamp(1, 12);
     format!(
         "{}/{}/{}/{:02}/{:02}/{}h_ticks.bi5",
         base_url,
@@ -1194,6 +1277,21 @@ mod tests {
         assert_eq!(
             url,
             "https://datafeed.dukascopy.com/datafeed/USDJPY/2024/11/31/23h_ticks.bi5"
+        );
+    }
+
+    #[test]
+    fn test_build_url_clamps_invalid_months() {
+        let below_range = DukascopyClient::build_url("EURUSD", 2024, 0, 15, 14);
+        assert_eq!(
+            below_range,
+            "https://datafeed.dukascopy.com/datafeed/EURUSD/2024/00/15/14h_ticks.bi5"
+        );
+
+        let above_range = DukascopyClient::build_url("EURUSD", 2024, 13, 15, 14);
+        assert_eq!(
+            above_range,
+            "https://datafeed.dukascopy.com/datafeed/EURUSD/2024/11/15/14h_ticks.bi5"
         );
     }
 
@@ -1380,14 +1478,27 @@ mod tests {
             },
         ];
 
-        let first = DukascopyClient::find_tick_at_or_before_parsed(&ticks, 50).unwrap();
-        assert_eq!(first.ms_from_hour, 100);
+        let first = DukascopyClient::find_tick_at_or_before_parsed(&ticks, 50);
+        assert!(first.is_none());
 
         let second = DukascopyClient::find_tick_at_or_before_parsed(&ticks, 1_000).unwrap();
         assert_eq!(second.ms_from_hour, 1_000);
 
         let last = DukascopyClient::find_tick_at_or_before_parsed(&ticks, 3_000).unwrap();
         assert_eq!(last.ms_from_hour, 1_000);
+    }
+
+    #[test]
+    fn test_find_tick_at_or_before_rejects_lookahead() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&100u32.to_be_bytes()); // ms
+        data.extend_from_slice(&110_100u32.to_be_bytes()); // ask raw
+        data.extend_from_slice(&110_000u32.to_be_bytes()); // bid raw
+        data.extend_from_slice(&1.0f32.to_be_bytes()); // ask volume
+        data.extend_from_slice(&1.0f32.to_be_bytes()); // bid volume
+
+        let result = DukascopyClient::find_tick_at_or_before(&data, 50, InstrumentConfig::STANDARD);
+        assert!(matches!(result, Err(DukascopyError::DataNotFound)));
     }
 
     #[test]
