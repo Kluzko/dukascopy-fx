@@ -45,3 +45,8 @@ path = "src/bin/fx_fetcher.rs"
 [dev-dependencies]
 env_logger = "0.9"
 serial_test = "3.2"
+criterion = "0.5"
+
+[[bench]]
+name = "core_benchmarks"
+harness = false
