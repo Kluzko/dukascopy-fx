@@ -413,15 +413,24 @@ impl DukascopyClientBuilder {
             .tcp_nodelay(true)
             .pool_idle_timeout(None)
             .timeout(StdDuration::from_secs(config.timeout_secs))
+            .no_proxy()
             .build()
         {
             Ok(client) => client,
             Err(err) => {
                 warn!(
-                    "Failed to create custom HTTP client config (falling back to reqwest::Client::new()): {}",
+                    "Failed to create custom HTTP client config (falling back to minimal no-proxy client): {}",
                     err
                 );
-                Client::new()
+                Client::builder()
+                    .no_proxy()
+                    .build()
+                    .unwrap_or_else(|fallback_err| {
+                        panic!(
+                            "Failed to construct reqwest client (primary='{}', fallback='{}')",
+                            err, fallback_err
+                        )
+                    })
             }
         };
 
