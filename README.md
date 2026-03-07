@@ -90,7 +90,17 @@ cargo run --bin fx_fetcher -- update \
   --interval 1h \
   --checkpoint .state/checkpoints.json \
   --out data/fx.csv
+
+# machine-readable output for automation
+cargo run --bin fx_fetcher -- --json list-instruments
+
+# config-driven defaults
+cargo run --bin fx_fetcher -- --config config/fx_fetcher.example.toml backfill --symbols EURUSD
 ```
+
+`fx_fetcher` global flags:
+- `--config PATH.toml`: load command defaults from TOML file
+- `--json`: emit JSON summary/errors for CI scripts and wrappers
 
 ## API Highlights
 
@@ -162,6 +172,7 @@ LIVE_TESTS=1 cargo test --test integration_test
 
 - API stability policy: [`docs/API_STABILITY.md`](docs/API_STABILITY.md)
 - Benchmark methodology: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
+- CLI config reference: [`docs/CLI_CONFIG.md`](docs/CLI_CONFIG.md)
 - Roadmap: [`ROADMAP.md`](ROADMAP.md)
 - Release notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 

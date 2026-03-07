@@ -1,0 +1,29 @@
+[global]
+universe = "config/universe.json"
+checkpoint = ".state/checkpoints.json"
+concurrency = 8
+json = false
+
+[backfill]
+# symbols = ["EURUSD", "GBPUSD"]
+period = "30d"
+interval = "1h"
+out = "data/fx.csv"
+no_output = false
+
+[update]
+# symbols = ["EURUSD", "GBPUSD"]
+lookback = "7d"
+interval = "1h"
+out = "data/fx.csv"
+no_output = false
+
+[sync_universe]
+source = "https://www.dukascopy-node.app"
+dry_run = false
+activate_new = false
+
+[export]
+# input = "data/fx.csv"
+# out = "data/fx.parquet"
+has_headers = false
