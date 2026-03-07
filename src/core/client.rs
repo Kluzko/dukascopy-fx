@@ -2,7 +2,7 @@
 
 use crate::core::instrument::{InstrumentConfig, InstrumentProvider, OverrideInstrumentProvider};
 use crate::core::parser::{DukascopyParser, ParsedTick, TICK_SIZE_BYTES};
-use crate::error::DukascopyError;
+use crate::error::{DukascopyError, TransportErrorKind};
 use crate::market::{is_market_open, last_available_tick_time};
 use crate::models::{CurrencyExchange, CurrencyPair, RateRequest};
 
@@ -62,6 +62,9 @@ pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 200;
 
 /// Default maximum number of in-flight HTTP requests per client
 pub const DEFAULT_MAX_IN_FLIGHT_REQUESTS: usize = 8;
+
+/// Default maximum number of concurrent batch-download tasks.
+pub const DEFAULT_MAX_DOWNLOAD_CONCURRENCY: usize = 8;
 
 /// Maximum number of hours to backtrack when resolving at-or-before tick.
 pub const DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS: usize = 72;
@@ -144,6 +147,8 @@ pub struct ClientConfig {
     pub retry_base_delay_ms: u64,
     /// Maximum number of concurrent in-flight HTTP requests
     pub max_in_flight_requests: usize,
+    /// Maximum number of concurrent batch download tasks.
+    pub max_download_concurrency: usize,
     /// Maximum number of hours to scan backward for at-or-before tick lookup.
     pub max_at_or_before_backtrack_hours: usize,
     /// Whether market-hours filtering should be applied (FX-style).
@@ -171,6 +176,7 @@ impl Default for ClientConfig {
             max_retries: DEFAULT_MAX_RETRIES,
             retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
             max_in_flight_requests: DEFAULT_MAX_IN_FLIGHT_REQUESTS,
+            max_download_concurrency: DEFAULT_MAX_DOWNLOAD_CONCURRENCY,
             max_at_or_before_backtrack_hours: DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS,
             respect_market_hours: true,
             default_quote_currency: None,
@@ -244,6 +250,12 @@ impl DukascopyClientBuilder {
     /// Sets the maximum number of in-flight HTTP requests.
     pub fn max_in_flight_requests(mut self, max_requests: usize) -> Self {
         self.config.max_in_flight_requests = max_requests;
+        self
+    }
+
+    /// Sets the maximum number of concurrent batch download tasks.
+    pub fn max_download_concurrency(mut self, max_download_concurrency: usize) -> Self {
+        self.config.max_download_concurrency = max_download_concurrency;
         self
     }
 
@@ -474,6 +486,10 @@ impl ConfiguredClient {
         let config = self.get_instrument_config(resolved_pair.from(), resolved_pair.to());
         let mut query_timestamp = effective_timestamp;
         let mut fallback_attempts = 0usize;
+        let not_found_for = |query_time: DateTime<Utc>| DukascopyError::DataNotFoundFor {
+            pair: format!("{}/{}", resolved_pair.from(), resolved_pair.to()),
+            timestamp: query_time.to_rfc3339(),
+        };
 
         loop {
             let hour_start = DukascopyClient::hour_start(query_timestamp)?;
@@ -489,11 +505,11 @@ impl ConfiguredClient {
                 Ok(data) => data,
                 Err(DukascopyError::DataNotFound) if fallback_attempts > 0 => {
                     if fallback_attempts >= self.config.max_at_or_before_backtrack_hours {
-                        return Err(DukascopyError::DataNotFound);
+                        return Err(not_found_for(query_timestamp));
                     }
                     query_timestamp = hour_start
                         .checked_sub_signed(Duration::milliseconds(1))
-                        .ok_or(DukascopyError::DataNotFound)?;
+                        .ok_or_else(|| not_found_for(query_timestamp))?;
                     fallback_attempts += 1;
                     continue;
                 }
@@ -510,11 +526,11 @@ impl ConfiguredClient {
                 }
                 Err(DukascopyError::DataNotFound) => {
                     if fallback_attempts >= self.config.max_at_or_before_backtrack_hours {
-                        return Err(DukascopyError::DataNotFound);
+                        return Err(not_found_for(query_timestamp));
                     }
                     query_timestamp = hour_start
                         .checked_sub_signed(Duration::milliseconds(1))
-                        .ok_or(DukascopyError::DataNotFound)?;
+                        .ok_or_else(|| not_found_for(query_timestamp))?;
                     fallback_attempts += 1;
                 }
                 Err(err) => return Err(err),
@@ -674,14 +690,14 @@ impl ConfiguredClient {
         let direct_pair = CurrencyPair::try_new(from.to_string(), to.to_string())?;
         match self.get_exchange_rate(&direct_pair, timestamp).await {
             Ok(exchange) => return Ok(Some(exchange)),
-            Err(DukascopyError::DataNotFound) => {}
+            Err(err) if err.is_not_found() => {}
             Err(err) => return Err(err),
         }
 
         let inverse_pair = CurrencyPair::try_new(to.to_string(), from.to_string())?;
         match self.get_exchange_rate(&inverse_pair, timestamp).await {
             Ok(exchange) => Ok(Some(DukascopyClient::invert_exchange(&exchange)?)),
-            Err(DukascopyError::DataNotFound) => Ok(None),
+            Err(err) if err.is_not_found() => Ok(None),
             Err(err) => Err(err),
         }
     }
@@ -734,6 +750,11 @@ impl ConfiguredClient {
 
         let mut results: Vec<CurrencyExchange> = Vec::new();
         let mut hour_cache: Option<(DateTime<Utc>, Vec<ParsedTick>)> = None;
+        let mut hour_fallback_cache: Option<(
+            DateTime<Utc>,
+            Option<u32>,
+            Option<CurrencyExchange>,
+        )> = None;
         let pair_symbol = resolved_pair.as_symbol();
         let config = self.get_instrument_config(resolved_pair.from(), resolved_pair.to());
         let mut current = start;
@@ -770,14 +791,15 @@ impl ConfiguredClient {
                     }
                     Err(DukascopyError::DataNotFound) => {
                         hour_cache = Some((hour_start, Vec::new()));
-                        current += interval;
-                        continue;
                     }
                     Err(e) => return Err(e),
                 }
             }
 
             let target_ms = DukascopyClient::timestamp_to_ms_from_hour(current);
+            let first_tick_ms = hour_cache
+                .as_ref()
+                .and_then(|(_, ticks)| ticks.first().map(|tick| tick.ms_from_hour));
             let mut exchange = match hour_cache.as_ref() {
                 Some((_, ticks)) => {
                     if let Some(tick) =
@@ -802,14 +824,26 @@ impl ConfiguredClient {
             }
 
             if exchange.is_none() {
+                if let Some((cached_hour, cached_first_tick_ms, cached_exchange)) =
+                    &hour_fallback_cache
+                {
+                    if *cached_hour == hour_start && *cached_first_tick_ms == first_tick_ms {
+                        exchange = cached_exchange.clone();
+                    }
+                }
+            }
+
+            if exchange.is_none() {
                 let fallback_ts = current
                     .checked_sub_signed(Duration::milliseconds(1))
                     .ok_or(DukascopyError::DataNotFound)?;
-                exchange = match self.get_exchange_rate(pair, fallback_ts).await {
+                let computed_fallback = match self.get_exchange_rate(pair, fallback_ts).await {
                     Ok(value) => Some(value),
-                    Err(DukascopyError::DataNotFound) => None,
+                    Err(err) if err.is_not_found() => None,
                     Err(err) => return Err(err),
                 };
+                hour_fallback_cache = Some((hour_start, first_tick_ms, computed_fallback.clone()));
+                exchange = computed_fallback;
             }
 
             if let Some(exchange) = exchange {
@@ -968,9 +1002,23 @@ impl ConfiguredClient {
         if err.is_timeout() {
             DukascopyError::Timeout(self.config.timeout_secs)
         } else if err.is_connect() {
-            DukascopyError::HttpError(format!("Connection failed: {}", err))
+            DukascopyError::Transport {
+                kind: TransportErrorKind::Connect,
+                status: None,
+                message: err.to_string(),
+            }
+        } else if err.is_body() {
+            DukascopyError::Transport {
+                kind: TransportErrorKind::ResponseBody,
+                status: err.status().map(|status| status.as_u16()),
+                message: err.to_string(),
+            }
         } else {
-            DukascopyError::HttpError(err.to_string())
+            DukascopyError::Transport {
+                kind: TransportErrorKind::Other,
+                status: err.status().map(|status| status.as_u16()),
+                message: err.to_string(),
+            }
         }
     }
 
@@ -1261,11 +1309,14 @@ fn map_http_error(status: reqwest::StatusCode) -> DukascopyError {
         reqwest::StatusCode::BAD_REQUEST => {
             DukascopyError::InvalidRequest("Bad request".to_string())
         }
-        status => DukascopyError::HttpError(format!(
-            "HTTP {} - {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("Unknown")
-        )),
+        status => DukascopyError::Transport {
+            kind: TransportErrorKind::HttpStatus,
+            status: Some(status.as_u16()),
+            message: status
+                .canonical_reason()
+                .unwrap_or("Unknown HTTP status")
+                .to_string(),
+        },
     }
 }
 
@@ -1339,6 +1390,10 @@ mod tests {
             DEFAULT_MAX_IN_FLIGHT_REQUESTS
         );
         assert_eq!(
+            config.max_download_concurrency,
+            DEFAULT_MAX_DOWNLOAD_CONCURRENCY
+        );
+        assert_eq!(
             config.max_at_or_before_backtrack_hours,
             DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS
         );
@@ -1372,6 +1427,7 @@ mod tests {
             .max_retries(5)
             .retry_base_delay_ms(150)
             .max_in_flight_requests(4)
+            .max_download_concurrency(3)
             .max_at_or_before_backtrack_hours(24)
             .respect_market_hours(false)
             .default_quote_currency("pln")
@@ -1386,6 +1442,7 @@ mod tests {
         assert_eq!(client.config().max_retries, 5);
         assert_eq!(client.config().retry_base_delay_ms, 150);
         assert_eq!(client.config().max_in_flight_requests, 4);
+        assert_eq!(client.config().max_download_concurrency, 3);
         assert_eq!(client.config().max_at_or_before_backtrack_hours, 24);
         assert!(!client.config().respect_market_hours);
         assert_eq!(client.default_quote_currency(), Some("PLN"));

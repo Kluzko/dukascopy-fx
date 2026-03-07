@@ -2,18 +2,28 @@
 
 use crate::error::DukascopyError;
 use crate::models::CurrencyExchange;
+#[cfg(feature = "sinks-parquet")]
 use arrow::array::{ArrayRef, Float32Array, Float64Array, StringArray, TimestampMillisecondArray};
+#[cfg(feature = "sinks-parquet")]
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+#[cfg(feature = "sinks-parquet")]
 use arrow::record_batch::RecordBatch;
+#[cfg(feature = "sinks-parquet")]
 use parquet::arrow::ArrowWriter;
+#[cfg(feature = "sinks-parquet")]
 use parquet::file::properties::WriterProperties;
+#[cfg(feature = "sinks-parquet")]
 use rust_decimal::prelude::ToPrimitive;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "sinks-parquet")]
 use std::sync::Arc;
 
+#[cfg(feature = "sinks-parquet")]
 const DEFAULT_PARQUET_FLUSH_ROWS: usize = 50_000;
+#[cfg(feature = "sinks-parquet")]
 const PART_FILE_PREFIX: &str = "part-";
+#[cfg(feature = "sinks-parquet")]
 const PART_FILE_SUFFIX: &str = ".parquet";
 
 /// Output sink interface used by fetcher jobs.
@@ -54,6 +64,7 @@ pub struct CsvSink {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(feature = "sinks-parquet")]
 struct SinkRow {
     symbol: String,
     base: String,
@@ -66,6 +77,7 @@ struct SinkRow {
     ask_volume: f32,
 }
 
+#[cfg(feature = "sinks-parquet")]
 fn decimal_to_f64(value: &rust_decimal::Decimal) -> Result<f64, DukascopyError> {
     value.to_f64().ok_or_else(|| {
         DukascopyError::InvalidRequest(format!(
@@ -75,6 +87,7 @@ fn decimal_to_f64(value: &rust_decimal::Decimal) -> Result<f64, DukascopyError> 
     })
 }
 
+#[cfg(feature = "sinks-parquet")]
 fn to_sink_row(symbol: &str, row: &CurrencyExchange) -> Result<SinkRow, DukascopyError> {
     Ok(SinkRow {
         symbol: symbol.to_string(),
@@ -94,6 +107,7 @@ fn to_sink_row(symbol: &str, row: &CurrencyExchange) -> Result<SinkRow, Dukascop
 /// The sink stores data as a parquet dataset directory (`part-*.parquet`).
 /// This makes incremental runs append-only and avoids data loss caused by
 /// truncating a single parquet file on each run.
+#[cfg(feature = "sinks-parquet")]
 pub struct ParquetSink {
     path: PathBuf,
     rows: Vec<SinkRow>,
@@ -101,6 +115,7 @@ pub struct ParquetSink {
     next_part_index: u64,
 }
 
+#[cfg(feature = "sinks-parquet")]
 impl ParquetSink {
     /// Creates a parquet sink. Data is written in parts on `flush()`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DukascopyError> {
@@ -428,6 +443,7 @@ impl DataSink for CsvSink {
     }
 }
 
+#[cfg(feature = "sinks-parquet")]
 impl DataSink for ParquetSink {
     fn write_batch(
         &mut self,
@@ -464,6 +480,7 @@ mod tests {
     use super::*;
     use crate::models::CurrencyPair;
     use chrono::TimeZone;
+    #[cfg(feature = "sinks-parquet")]
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use rust_decimal::Decimal;
     use std::str::FromStr;
@@ -482,6 +499,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sinks-parquet")]
     fn dataset_row_count(path: &Path) -> i64 {
         let mut total = 0_i64;
         for entry in fs::read_dir(path).unwrap() {
@@ -526,6 +544,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sinks-parquet")]
     fn test_parquet_sink_writes_rows() {
         let unique = format!(
             "dukascopy_fx_sink_dataset_test_{}",
@@ -550,6 +569,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sinks-parquet")]
     fn test_parquet_sink_appends_on_multiple_flushes() {
         let unique = format!(
             "dukascopy_fx_sink_append_test_{}",
@@ -586,6 +606,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sinks-parquet")]
     fn test_parquet_sink_migrates_legacy_file_without_data_loss() {
         let unique = format!(
             "dukascopy_fx_sink_legacy_test_{}.parquet",

@@ -7,7 +7,8 @@
 mod ticker;
 
 pub use ticker::{
-    download, download_incremental, download_incremental_with_concurrency, download_range,
-    download_range_with_concurrency, download_with_concurrency, Period, Ticker,
-    DEFAULT_DOWNLOAD_CONCURRENCY,
+    download, download_incremental, download_incremental_with_client,
+    download_incremental_with_concurrency, download_range, download_range_with_client,
+    download_range_with_concurrency, download_with_client, download_with_concurrency, Period,
+    Ticker, DEFAULT_DOWNLOAD_CONCURRENCY,
 };

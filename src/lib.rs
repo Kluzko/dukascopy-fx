@@ -105,15 +105,18 @@ pub mod time;
 // ============================================================================
 
 pub use api::{
-    download, download_incremental, download_incremental_with_concurrency, download_range,
-    download_range_with_concurrency, download_with_concurrency, Period, Ticker,
-    DEFAULT_DOWNLOAD_CONCURRENCY,
+    download, download_incremental, download_incremental_with_client,
+    download_incremental_with_concurrency, download_range, download_range_with_client,
+    download_range_with_concurrency, download_with_client, download_with_concurrency, Period,
+    Ticker, DEFAULT_DOWNLOAD_CONCURRENCY,
 };
 pub use core::catalog::{AssetClass, InstrumentCatalog, InstrumentDefinition};
 pub use error::DukascopyError;
 pub use models::{CurrencyExchange, CurrencyPair, RateRequest, RequestParseMode};
 pub use storage::checkpoint::{CheckpointStore, FileCheckpointStore};
-pub use storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
+#[cfg(feature = "sinks-parquet")]
+pub use storage::sink::ParquetSink;
+pub use storage::sink::{CsvSink, DataSink, NoopSink};
 
 /// Convenient alias for [`DukascopyError`]
 pub type Error = DukascopyError;
@@ -130,7 +133,7 @@ use chrono::{DateTime, Duration, Utc};
 /// Fetches the exchange rate for a currency pair at a specific timestamp.
 #[inline]
 pub async fn get_rate(from: &str, to: &str, timestamp: DateTime<Utc>) -> Result<CurrencyExchange> {
-    let pair = CurrencyPair::new(from, to);
+    let pair = CurrencyPair::try_new(from, to)?;
     core::client::DukascopyClient::get_exchange_rate(&pair, timestamp).await
 }
 
@@ -184,7 +187,7 @@ pub async fn get_rates_range(
     end: DateTime<Utc>,
     interval: Duration,
 ) -> Result<Vec<CurrencyExchange>> {
-    let pair = CurrencyPair::new(from, to);
+    let pair = CurrencyPair::try_new(from, to)?;
     core::client::DukascopyClient::get_exchange_rates_range(&pair, start, end, interval).await
 }
 
@@ -250,9 +253,10 @@ pub mod advanced {
     pub use crate::core::client::{
         ClientConfig, ConfiguredClient, ConversionMode, ConversionPathType, DukascopyClient,
         DukascopyClientBuilder, PairResolutionMode, ResolvedExchange, DEFAULT_CACHE_SIZE,
-        DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS, DEFAULT_MAX_IDLE_CONNECTIONS,
-        DEFAULT_MAX_IN_FLIGHT_REQUESTS, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_DELAY_MS,
-        DEFAULT_TIMEOUT_SECS, DUKASCOPY_BASE_URL, GLOBAL_DEFAULT_QUOTE_CURRENCY,
+        DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS, DEFAULT_MAX_DOWNLOAD_CONCURRENCY,
+        DEFAULT_MAX_IDLE_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT_REQUESTS, DEFAULT_MAX_RETRIES,
+        DEFAULT_RETRY_BASE_DELAY_MS, DEFAULT_TIMEOUT_SECS, DUKASCOPY_BASE_URL,
+        GLOBAL_DEFAULT_QUOTE_CURRENCY,
     };
     pub use crate::core::instrument::{
         resolve_instrument_config, CurrencyCategory, DefaultInstrumentProvider,
@@ -263,7 +267,9 @@ pub mod advanced {
     pub use crate::market::last_available_tick_time;
     pub use crate::models::{RateRequest, RequestParseMode};
     pub use crate::storage::checkpoint::{CheckpointStore, FileCheckpointStore};
-    pub use crate::storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
+    #[cfg(feature = "sinks-parquet")]
+    pub use crate::storage::sink::ParquetSink;
+    pub use crate::storage::sink::{CsvSink, DataSink, NoopSink};
 }
 
 // ============================================================================
@@ -277,16 +283,19 @@ pub mod advanced {
 /// ```
 pub mod prelude {
     pub use crate::api::{
-        download, download_incremental, download_incremental_with_concurrency, download_range,
-        download_range_with_concurrency, download_with_concurrency, Period, Ticker,
-        DEFAULT_DOWNLOAD_CONCURRENCY,
+        download, download_incremental, download_incremental_with_client,
+        download_incremental_with_concurrency, download_range, download_range_with_client,
+        download_range_with_concurrency, download_with_client, download_with_concurrency, Period,
+        Ticker, DEFAULT_DOWNLOAD_CONCURRENCY,
     };
     pub use crate::core::catalog::{AssetClass, InstrumentCatalog, InstrumentDefinition};
     pub use crate::error::DukascopyError;
     pub use crate::market::{is_market_open, is_weekend, MarketStatus};
     pub use crate::models::{CurrencyExchange, CurrencyPair, RateRequest, RequestParseMode};
     pub use crate::storage::checkpoint::{CheckpointStore, FileCheckpointStore};
-    pub use crate::storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
+    #[cfg(feature = "sinks-parquet")]
+    pub use crate::storage::sink::ParquetSink;
+    pub use crate::storage::sink::{CsvSink, DataSink, NoopSink};
     pub use crate::time::{
         date, datetime, days_ago, hours_ago, now, weeks_ago, DateTime, Duration, Utc,
     };

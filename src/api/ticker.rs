@@ -1,6 +1,6 @@
 //! yfinance-style Ticker API for forex data.
 
-use crate::core::client::{ConfiguredClient, DukascopyClient};
+use crate::core::client::{ConfiguredClient, DukascopyClient, DEFAULT_MAX_DOWNLOAD_CONCURRENCY};
 use crate::error::DukascopyError;
 use crate::market::last_available_tick_time;
 use crate::models::{CurrencyExchange, CurrencyPair};
@@ -10,7 +10,7 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use std::str::FromStr;
 
 /// Default maximum number of concurrent ticker download tasks.
-pub const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
+pub const DEFAULT_DOWNLOAD_CONCURRENCY: usize = DEFAULT_MAX_DOWNLOAD_CONCURRENCY;
 
 /// Typed period for historical queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +122,9 @@ impl Ticker {
     }
 
     /// Creates a new ticker for a currency pair.
+    ///
+    /// This constructor does not validate instrument codes.
+    /// Prefer [`Ticker::try_new`] for validated input paths.
     #[inline]
     pub fn new(from: &str, to: &str) -> Self {
         Self {
@@ -487,6 +490,40 @@ pub async fn download_with_concurrency(
         .collect())
 }
 
+/// Downloads historical data using client-configured concurrency.
+pub async fn download_with_client(
+    client: &ConfiguredClient,
+    tickers: &[Ticker],
+    period: &str,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    if tickers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let concurrency = resolve_download_concurrency(
+        tickers.len(),
+        client.config().max_download_concurrency.max(1),
+    )?;
+    let period = period.to_string();
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> =
+        stream::iter(tickers.iter().cloned().enumerate().map(|(index, ticker)| {
+            let period = period.clone();
+            async move {
+                let history = ticker.history_with_client(client, &period).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }
+        }))
+        .buffer_unordered(concurrency)
+        .try_collect()
+        .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
+}
+
 /// Downloads historical data with custom date range.
 pub async fn download_range(
     tickers: &[Ticker],
@@ -515,6 +552,42 @@ pub async fn download_range_with_concurrency(
             .enumerate()
             .map(|(index, ticker)| async move {
                 let history = ticker.history_range(start, end).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }),
+    )
+    .buffer_unordered(concurrency)
+    .try_collect()
+    .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
+}
+
+/// Downloads historical data over a custom range using client-configured concurrency.
+pub async fn download_range_with_client(
+    client: &ConfiguredClient,
+    tickers: &[Ticker],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    if tickers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let concurrency = resolve_download_concurrency(
+        tickers.len(),
+        client.config().max_download_concurrency.max(1),
+    )?;
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
+        tickers
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, ticker)| async move {
+                let history = ticker.history_range_with_client(client, start, end).await?;
                 Ok::<_, DukascopyError>((index, ticker, history))
             }),
     )
@@ -558,6 +631,44 @@ pub async fn download_incremental_with_concurrency<S: CheckpointStore>(
             .enumerate()
             .map(|(index, ticker)| async move {
                 let history = ticker.fetch_incremental(store, lookback).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }),
+    )
+    .buffer_unordered(concurrency)
+    .try_collect()
+    .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
+}
+
+/// Incrementally downloads data using client-configured concurrency.
+pub async fn download_incremental_with_client<S: CheckpointStore>(
+    client: &ConfiguredClient,
+    tickers: &[Ticker],
+    store: &S,
+    lookback: Duration,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    if tickers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let concurrency = resolve_download_concurrency(
+        tickers.len(),
+        client.config().max_download_concurrency.max(1),
+    )?;
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
+        tickers
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, ticker)| async move {
+                let history = ticker
+                    .fetch_incremental_with_client(client, store, lookback)
+                    .await?;
                 Ok::<_, DukascopyError>((index, ticker, history))
             }),
     )
@@ -901,5 +1012,39 @@ mod tests {
         let result =
             download_incremental_with_concurrency(&[ticker], &store, Duration::hours(1), 0).await;
         assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_download_with_client_empty_returns_empty_without_network_call() {
+        let client = crate::advanced::DukascopyClientBuilder::new()
+            .max_download_concurrency(2)
+            .build();
+        let result = download_with_client(&client, &[], "1d").await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_range_with_client_empty_returns_empty_without_network_call() {
+        let client = crate::advanced::DukascopyClientBuilder::new()
+            .max_download_concurrency(2)
+            .build();
+        let start = Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 1, 0, 0).unwrap();
+        let result = download_range_with_client(&client, &[], start, end)
+            .await
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_incremental_with_client_empty_returns_empty_without_network_call() {
+        let client = crate::advanced::DukascopyClientBuilder::new()
+            .max_download_concurrency(2)
+            .build();
+        let store = InMemoryCheckpointStore::default();
+        let result = download_incremental_with_client(&client, &[], &store, Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(result.is_empty());
     }
 }

@@ -20,16 +20,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `DukascopyClientBuilder::max_at_or_before_backtrack_hours(...)`
   - `DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS`
   - `DEFAULT_DOWNLOAD_CONCURRENCY`
+- Client-scoped batch helpers that read concurrency from client config:
+  - `download_with_client(...)`
+  - `download_range_with_client(...)`
+  - `download_incremental_with_client(...)`
 
 ### Changed
 
 - Internal cache payloads are now shared (`Arc<[u8]>`) to reduce clone pressure on cache hits.
 - Range fallback prefers previously resolved samples before triggering additional network lookups.
+- Range fallback caches per-hour fallback lookups to avoid repeated network backtracking inside the same hour.
 - Integration tests are now opt-in at runtime (`LIVE_TESTS=1`) to reduce default CI/local flakiness.
+- Public helper functions (`get_rate`, `get_rates_range`) now validate pair codes eagerly via `CurrencyPair::try_new`.
+- Default Tokio dependency surface reduced (replaced `tokio/full` with explicit runtime/sync/time features).
+- `arrow`/`parquet` are now optional behind `sinks-parquet` feature.
 
 ### Documentation
 
 - README updated with strict request parsing, typed periods, concurrency controls, and live test instructions.
+- README updated with feature-flag guidance (`sinks-parquet`) and validated constructor preference.
+
+### Fixed
+
+- Transport failures now emit structured `DukascopyError::Transport { kind, status, message }`.
+- `DataNotFoundFor` is now emitted by at-or-before lookup exhaustion paths.
+
+### Removed
+
+- Removed unused `DukascopyError::MarketClosed` variant.
 
 ## [0.4.1] - 2026-03-07
 

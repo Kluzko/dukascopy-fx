@@ -33,7 +33,7 @@ use dukascopy_fx::{Ticker, datetime};
 
 #[tokio::main]
 async fn main() -> dukascopy_fx::Result<()> {
-    let ticker = Ticker::new("EUR", "USD");
+    let ticker = Ticker::try_new("EUR", "USD")?;
 
     let latest = ticker.rate().await?;
     println!("latest EUR/USD: {}", latest.rate);
@@ -83,7 +83,7 @@ Parsing rules:
 use dukascopy_fx::{Period, Ticker, ticker};
 use dukascopy_fx::time::Duration;
 
-let t1 = Ticker::new("EUR", "USD");
+let t1 = Ticker::try_new("EUR", "USD")?;
 let t2: Ticker = "GBP/JPY".parse()?;
 let t3 = ticker!("XAU/USD");
 
@@ -132,7 +132,7 @@ use dukascopy_fx::{FileCheckpointStore, Ticker};
 use dukascopy_fx::time::Duration;
 
 let store = FileCheckpointStore::open(".state/checkpoints.json")?;
-let ticker = Ticker::new("EUR", "USD").interval(Duration::hours(1));
+let ticker = Ticker::try_new("EUR", "USD")?.interval(Duration::hours(1));
 
 let rows = ticker.fetch_incremental(&store, Duration::days(7)).await?;
 println!("fetched {} rows", rows.len());
@@ -152,7 +152,8 @@ Most-used free functions:
 - `get_rates_range_for_pair(&CurrencyPair, start, end, interval)`
 
 Most-used `Ticker` methods:
-- `Ticker::new(from, to)`
+- `Ticker::try_new(from, to)` (validated)
+- `Ticker::new(from, to)` (unchecked convenience)
 - `Ticker::parse("EUR/USD")`
 - `rate()`, `rate_at(timestamp)`
 - `history("1w")`, `history_range(start, end)`
@@ -166,6 +167,7 @@ Most-used builder/client methods:
 - `pair_resolution_mode(...)`
 - `conversion_mode(...)`, `bridge_currencies(...)`
 - `code_alias("AAPL", "AAPLUS")`
+- `max_download_concurrency(...)`
 - `build()`
 - `ConfiguredClient::get_exchange_rate_for_symbol(...)`
 - `ConfiguredClient::get_exchange_rate_in_quote(...)`
@@ -247,6 +249,21 @@ Core commands:
 - `update`
 - `sync-universe`
 - `export`
+
+## Feature Flags
+
+- default: `logging`
+- `sinks-parquet`: enables `ParquetSink` (and `fx_fetcher` binary)
+
+Examples:
+
+```bash
+# library-only minimal build
+cargo build
+
+# enable parquet sink API and CLI binary
+cargo build --features sinks-parquet
+```
 
 ## Data Notes
 
