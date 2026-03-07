@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `download_with_client(...)`
   - `download_range_with_client(...)`
   - `download_incremental_with_client(...)`
+- Non-panicking convenience macros:
+  - `try_datetime!(...)`
+  - `try_ticker!(...)`
+- `time::try_datetime_utc(...)` as non-panicking companion for `datetime_utc`.
 
 ### Changed
 
@@ -34,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public helper functions (`get_rate`, `get_rates_range`) now validate pair codes eagerly via `CurrencyPair::try_new`.
 - Default Tokio dependency surface reduced (replaced `tokio/full` with explicit runtime/sync/time features).
 - `arrow`/`parquet` are now optional behind `sinks-parquet` feature.
+- `fx_fetcher` now builds without `sinks-parquet`; parquet operations return a clear feature-gating error.
+- `fx_fetcher` CLI now enforces strict flag validation and missing-value detection.
+- `fx_fetcher` scraping uses XML/HTML parsers (`quick-xml`, `scraper`) instead of manual string scanning.
+- `fx_fetcher` `--concurrency` now configures both client in-flight limits and batch worker fan-out.
+- `fx_fetcher` duration parser accepts `mo` and `y` units in addition to `m/h/d/w`.
 
 ### Documentation
 
@@ -44,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Transport failures now emit structured `DukascopyError::Transport { kind, status, message }`.
 - `DataNotFoundFor` is now emitted by at-or-before lookup exhaustion paths.
+- `fx_fetcher` prevents silent data-loss trap by requiring explicit output mode (`--out` or `--no-output`) and skipping checkpoint writes in `--no-output`.
+- `fx_fetcher export` supports CSV headers via `--has-headers` and validates pair codes during conversion.
 
 ### Removed
 

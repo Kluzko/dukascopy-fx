@@ -297,9 +297,10 @@ pub mod prelude {
     pub use crate::storage::sink::ParquetSink;
     pub use crate::storage::sink::{CsvSink, DataSink, NoopSink};
     pub use crate::time::{
-        date, datetime, days_ago, hours_ago, now, weeks_ago, DateTime, Duration, Utc,
+        date, datetime, days_ago, hours_ago, now, try_datetime_utc, weeks_ago, DateTime, Duration,
+        Utc,
     };
-    pub use crate::{datetime, ticker};
+    pub use crate::{datetime, ticker, try_datetime, try_ticker};
     pub use crate::{
         get_rate, get_rate_for_input, get_rate_for_input_with_mode, get_rate_for_pair,
         get_rate_for_request, get_rate_for_symbol, get_rate_in_quote, get_rates_range,

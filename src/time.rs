@@ -47,6 +47,8 @@ pub fn datetime(
 
 /// Creates a UTC datetime, panicking if invalid.
 ///
+/// Prefer [`try_datetime_utc`] or [`datetime`] when parsing user input.
+///
 /// # Panics
 /// Panics if the datetime components are invalid.
 ///
@@ -66,6 +68,21 @@ pub fn datetime_utc(
     second: u32,
 ) -> DateTime<Utc> {
     datetime(year, month, day, hour, minute, second).expect("Invalid datetime components")
+}
+
+/// Creates a UTC datetime and returns `None` when components are invalid.
+///
+/// This is a non-panicking companion to [`datetime_utc`].
+#[inline]
+pub fn try_datetime_utc(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Option<DateTime<Utc>> {
+    datetime(year, month, day, hour, minute, second)
 }
 
 /// Creates a UTC datetime from a date (at midnight).
@@ -198,5 +215,11 @@ mod tests {
     fn test_datetime_utc() {
         let dt = datetime_utc(2024, 1, 15, 14, 30, 0);
         assert_eq!(dt.year(), 2024);
+    }
+
+    #[test]
+    fn test_try_datetime_utc() {
+        assert!(try_datetime_utc(2024, 1, 15, 14, 30, 0).is_some());
+        assert!(try_datetime_utc(2024, 13, 15, 14, 30, 0).is_none());
     }
 }

@@ -40,6 +40,28 @@ macro_rules! datetime {
     };
 }
 
+/// Creates a UTC datetime and returns `Option<DateTime<Utc>>` instead of panicking.
+///
+/// # Example
+/// ```
+/// use dukascopy_fx::try_datetime;
+///
+/// let maybe = try_datetime!(2024-6-15 10:30 UTC);
+/// assert!(maybe.is_some());
+/// ```
+#[macro_export]
+macro_rules! try_datetime {
+    ($year:literal-$month:literal-$day:literal $hour:literal:$min:literal:$sec:literal UTC) => {
+        $crate::time::datetime($year, $month, $day, $hour, $min, $sec)
+    };
+    ($year:literal-$month:literal-$day:literal $hour:literal:$min:literal UTC) => {
+        $crate::time::datetime($year, $month, $day, $hour, $min, 0)
+    };
+    ($year:literal-$month:literal-$day:literal UTC) => {
+        $crate::time::datetime($year, $month, $day, 0, 0, 0)
+    };
+}
+
 /// Creates a ticker with a concise syntax.
 ///
 /// # Example
@@ -58,6 +80,25 @@ macro_rules! ticker {
     // From two codes: ticker!("EUR", "USD")
     ($from:literal, $to:literal) => {
         $crate::Ticker::new($from, $to)
+    };
+}
+
+/// Creates a ticker and returns `Result<Ticker, DukascopyError>`.
+///
+/// # Example
+/// ```
+/// use dukascopy_fx::try_ticker;
+///
+/// let eur_usd = try_ticker!("EUR/USD").unwrap();
+/// let gold = try_ticker!("XAU", "USD").unwrap();
+/// ```
+#[macro_export]
+macro_rules! try_ticker {
+    ($pair:literal) => {
+        $crate::Ticker::parse($pair)
+    };
+    ($from:literal, $to:literal) => {
+        $crate::Ticker::try_new($from, $to)
     };
 }
 
@@ -106,5 +147,23 @@ mod tests {
     fn test_ticker_macro_two_codes() {
         let ticker = ticker!("GBP", "JPY");
         assert_eq!(ticker.symbol(), "GBPJPY");
+    }
+
+    #[test]
+    fn test_try_datetime_macro_returns_option() {
+        let ok = try_datetime!(2024-1-15 14:30 UTC);
+        assert!(ok.is_some());
+    }
+
+    #[test]
+    fn test_try_ticker_macro_returns_result() {
+        let ticker = try_ticker!("EUR/USD").unwrap();
+        assert_eq!(ticker.symbol(), "EURUSD");
+
+        let err = try_ticker!("BAD$", "USD").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::DukascopyError::InvalidCurrencyCode { code, .. } if code == "BAD$"
+        ));
     }
 }

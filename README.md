@@ -241,6 +241,12 @@ cargo run --bin fx_fetcher -- update \
   --interval 1h \
   --checkpoint .state/checkpoints.json \
   --out data/fx.parquet
+
+# explicit no-output mode (checkpoints won't be updated)
+cargo run --bin fx_fetcher -- backfill \
+  --symbols EURUSD \
+  --period 7d \
+  --no-output
 ```
 
 Core commands:
@@ -249,6 +255,10 @@ Core commands:
 - `update`
 - `sync-universe`
 - `export`
+
+Notes:
+- `backfill`/`update` require explicit output mode: `--out PATH` or `--no-output`
+- `export` accepts `--has-headers` for CSV files with header row
 
 ## Feature Flags
 

@@ -3,16 +3,24 @@ use dukascopy_fx::advanced::{
     last_available_tick_time, resolve_instrument_config, ConfiguredClient, DukascopyClientBuilder,
 };
 use dukascopy_fx::storage::checkpoint::CheckpointStore;
-use dukascopy_fx::storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
+#[cfg(feature = "sinks-parquet")]
+use dukascopy_fx::storage::sink::ParquetSink;
+use dukascopy_fx::storage::sink::{CsvSink, DataSink, NoopSink};
+#[cfg(feature = "sinks-parquet")]
+use dukascopy_fx::CurrencyPair;
 use dukascopy_fx::{
-    AssetClass, CurrencyExchange, CurrencyPair, DukascopyError, FileCheckpointStore,
-    InstrumentCatalog, InstrumentDefinition, Ticker,
+    AssetClass, CurrencyExchange, DukascopyError, FileCheckpointStore, InstrumentCatalog,
+    InstrumentDefinition, Ticker,
 };
+use quick_xml::events::Event;
+#[cfg(feature = "sinks-parquet")]
 use rust_decimal::Decimal;
+use scraper::{Html, Selector};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
+#[cfg(feature = "sinks-parquet")]
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -46,11 +54,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
         print_usage();
-        return Ok(());
+        return Err("Missing command. See usage above.".into());
     }
 
     match args[0].as_str() {
+        "--help" | "-h" => {
+            print_usage();
+        }
         "list-instruments" => {
+            if has_flag(&args[1..], "--help") {
+                println!("fx_fetcher list-instruments [--universe PATH]");
+                return Ok(());
+            }
+            validate_flags(&args[1..], &["--universe"], &[])?;
             let universe_path = read_flag_value(&args[1..], "--universe")
                 .unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
             list_instruments(&universe_path)?;
@@ -69,6 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             print_usage();
+            return Err(format!("Unknown command '{}'", args[0]).into());
         }
     }
 
@@ -81,15 +98,73 @@ fn print_usage() {
     println!("Usage:");
     println!("  fx_fetcher list-instruments [--universe PATH]");
     println!(
-        "  fx_fetcher backfill [--universe PATH] [--symbols EURUSD,GBPUSD] [--period 30d] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet)] [--concurrency N]"
+        "  fx_fetcher backfill [--universe PATH] [--symbols EURUSD,GBPUSD] [--period 30d] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet) | --no-output] [--concurrency N]"
     );
     println!(
-        "  fx_fetcher update [--universe PATH] [--symbols EURUSD,GBPUSD] [--lookback 7d] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet)] [--concurrency N]"
+        "  fx_fetcher update [--universe PATH] [--symbols EURUSD,GBPUSD] [--lookback 7d] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet) | --no-output] [--concurrency N]"
     );
     println!(
         "  fx_fetcher sync-universe [--universe PATH] [--source URL] [--dry-run] [--activate-new]"
     );
-    println!("  fx_fetcher export --input PATH.csv --out PATH.parquet");
+    println!("  fx_fetcher export --input PATH.csv --out PATH.parquet [--has-headers]");
+    #[cfg(not(feature = "sinks-parquet"))]
+    println!("  note: parquet export/output needs --features sinks-parquet");
+}
+
+fn print_backfill_usage() {
+    println!(
+        "fx_fetcher backfill [--universe PATH] [--symbols EURUSD,GBPUSD] [--period 30d|1mo|1y] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet) | --no-output] [--concurrency N]"
+    );
+}
+
+fn print_update_usage() {
+    println!(
+        "fx_fetcher update [--universe PATH] [--symbols EURUSD,GBPUSD] [--lookback 7d|1mo|1y] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet) | --no-output] [--concurrency N]"
+    );
+}
+
+fn print_sync_universe_usage() {
+    println!(
+        "fx_fetcher sync-universe [--universe PATH] [--source URL] [--dry-run] [--activate-new]"
+    );
+}
+
+fn print_export_usage() {
+    println!("fx_fetcher export --input PATH.csv --out PATH.parquet [--has-headers]");
+}
+
+fn validate_flags(
+    args: &[String],
+    flags_with_values: &[&str],
+    flags_without_values: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut i = 0usize;
+    while i < args.len() {
+        let current = &args[i];
+        if !current.starts_with("--") {
+            return Err(format!("Unexpected positional argument '{}'", current).into());
+        }
+
+        if flags_with_values.contains(&current.as_str()) {
+            let Some(value) = args.get(i + 1) else {
+                return Err(format!("Missing value for option '{}'", current).into());
+            };
+            if value.starts_with("--") {
+                return Err(format!("Missing value for option '{}'", current).into());
+            }
+            i += 2;
+            continue;
+        }
+
+        if flags_without_values.contains(&current.as_str()) {
+            i += 1;
+            continue;
+        }
+
+        return Err(format!("Unknown option '{}'", current).into());
+    }
+
+    Ok(())
 }
 
 fn list_instruments(universe_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -137,6 +212,16 @@ struct PersistedCatalog {
 }
 
 async fn run_sync_universe(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_sync_universe_usage();
+        return Ok(());
+    }
+    validate_flags(
+        args,
+        &["--universe", "--source"],
+        &["--dry-run", "--activate-new"],
+    )?;
+
     let universe_path =
         read_flag_value(args, "--universe").unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
     let source =
@@ -486,64 +571,170 @@ fn is_country_equity_category(category: &str) -> bool {
 }
 
 fn extract_slugs_from_sitemap(xml: &str, marker: &str) -> Vec<String> {
-    let mut cursor = 0usize;
     let mut slugs = BTreeSet::new();
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
 
-    while let Some(loc_start_relative) = xml[cursor..].find("<loc>") {
-        let loc_start = cursor + loc_start_relative + "<loc>".len();
-        let Some(loc_end_relative) = xml[loc_start..].find("</loc>") else {
-            break;
-        };
-        let loc_end = loc_start + loc_end_relative;
-        let loc_value = &xml[loc_start..loc_end];
-
-        if let Some(marker_position) = loc_value.find(marker) {
-            let slug = &loc_value[marker_position + marker.len()..];
-            if !slug.is_empty()
-                && slug
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-            {
-                slugs.insert(slug.to_ascii_lowercase());
+    let mut in_loc = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(tag)) if tag.name().as_ref() == b"loc" => {
+                in_loc = true;
             }
+            Ok(Event::End(tag)) if tag.name().as_ref() == b"loc" => {
+                in_loc = false;
+            }
+            Ok(Event::Text(text)) if in_loc => {
+                let loc_value = String::from_utf8_lossy(text.as_ref()).into_owned();
+                if let Some(marker_position) = loc_value.find(marker) {
+                    let rest = &loc_value[marker_position + marker.len()..];
+                    let slug = rest
+                        .split(['?', '#', '/'])
+                        .next()
+                        .map(str::trim)
+                        .unwrap_or("");
+                    if !slug.is_empty()
+                        && slug
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+                    {
+                        slugs.insert(slug.to_ascii_lowercase());
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
         }
-
-        cursor = loc_end + "</loc>".len();
     }
 
     slugs.into_iter().collect()
 }
 
 fn extract_instrument_slugs_from_html(html: &str) -> Vec<String> {
-    let marker = "/instrument/";
-    let mut cursor = 0usize;
     let mut slugs = BTreeSet::new();
-    let bytes = html.as_bytes();
+    let document = Html::parse_document(html);
+    let Ok(selector) = Selector::parse("a[href]") else {
+        return Vec::new();
+    };
 
-    while let Some(index_relative) = html[cursor..].find(marker) {
-        let slug_start = cursor + index_relative + marker.len();
-        let mut slug_end = slug_start;
+    for element in document.select(&selector) {
+        let Some(href) = element.value().attr("href") else {
+            continue;
+        };
+        let Some(marker_idx) = href.find("/instrument/") else {
+            continue;
+        };
 
-        while slug_end < bytes.len() {
-            let ch = bytes[slug_end] as char;
-            if ch.is_ascii_alphanumeric() || ch == '-' {
-                slug_end += 1;
-                continue;
-            }
-            break;
+        let rest = &href[marker_idx + "/instrument/".len()..];
+        let slug = rest
+            .split(['/', '?', '#'])
+            .next()
+            .map(str::trim)
+            .unwrap_or("");
+        if slug.len() >= 4
+            && slug
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        {
+            slugs.insert(slug.to_ascii_lowercase());
         }
-
-        if slug_end > slug_start {
-            let slug = html[slug_start..slug_end].to_ascii_lowercase();
-            if slug.len() >= 4 {
-                slugs.insert(slug);
-            }
-        }
-
-        cursor = slug_end.max(slug_start + 1);
     }
 
     slugs.into_iter().collect()
+}
+
+fn validate_output_mode(
+    out_path: Option<&str>,
+    no_output: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if out_path.is_some() && no_output {
+        return Err("Use either --out PATH or --no-output, not both.".into());
+    }
+    if out_path.is_none() && !no_output {
+        return Err("Missing output mode. Provide --out PATH or --no-output.".into());
+    }
+
+    Ok(out_path.is_some())
+}
+
+fn should_persist_checkpoints(persist_output: bool) -> bool {
+    if persist_output {
+        true
+    } else {
+        eprintln!(
+            "  warning: --no-output selected, checkpoint updates are disabled to avoid data-loss traps"
+        );
+        false
+    }
+}
+
+fn build_tickers(
+    instruments: &[&InstrumentDefinition],
+    interval: Duration,
+) -> Result<Vec<Ticker>, DukascopyError> {
+    instruments
+        .iter()
+        .map(|instrument| {
+            Ticker::try_new(&instrument.base, &instrument.quote)
+                .map(|ticker| ticker.interval(interval))
+        })
+        .collect()
+}
+
+fn build_client_from_catalog(
+    catalog: &InstrumentCatalog,
+    instruments: &[&InstrumentDefinition],
+    concurrency: usize,
+) -> ConfiguredClient {
+    let max_concurrency = concurrency.max(1);
+    DukascopyClientBuilder::new()
+        .respect_market_hours(should_respect_market_hours(instruments))
+        .max_in_flight_requests(max_concurrency)
+        .max_download_concurrency(max_concurrency)
+        .with_instrument_catalog(catalog)
+        .build()
+}
+
+fn should_respect_market_hours(instruments: &[&InstrumentDefinition]) -> bool {
+    instruments
+        .iter()
+        .all(|instrument| matches!(instrument.asset_class, AssetClass::Fx | AssetClass::Metal))
+}
+
+fn create_sink(path: Option<&str>) -> Result<Box<dyn DataSink>, Box<dyn std::error::Error>> {
+    match path {
+        Some(path) => {
+            let path_lower = path.to_ascii_lowercase();
+            if path_lower.ends_with(".csv") {
+                return Ok(Box::new(CsvSink::open(path)?));
+            }
+            if path_lower.ends_with(".parquet") {
+                #[cfg(feature = "sinks-parquet")]
+                {
+                    return Ok(Box::new(ParquetSink::open(path)?));
+                }
+                #[cfg(not(feature = "sinks-parquet"))]
+                {
+                    return Err(
+                        "Parquet sink requires 'sinks-parquet' feature. Rebuild with --features sinks-parquet"
+                            .into(),
+                    );
+                }
+            }
+            Err(format!(
+                "Unsupported sink format for '{}'. Use .csv{}",
+                path,
+                if cfg!(feature = "sinks-parquet") {
+                    " or .parquet"
+                } else {
+                    ""
+                }
+            )
+            .into())
+        }
+        None => Ok(Box::new(NoopSink)),
+    }
 }
 
 fn split_symbol_slug(slug: &str) -> Option<(String, String)> {
@@ -575,6 +766,24 @@ fn split_symbol_slug(slug: &str) -> Option<(String, String)> {
 }
 
 async fn run_backfill(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_backfill_usage();
+        return Ok(());
+    }
+    validate_flags(
+        args,
+        &[
+            "--universe",
+            "--symbols",
+            "--period",
+            "--interval",
+            "--checkpoint",
+            "--out",
+            "--concurrency",
+        ],
+        &["--no-output"],
+    )?;
+
     let universe_path =
         read_flag_value(args, "--universe").unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
     let checkpoint_path = read_flag_value(args, "--checkpoint")
@@ -584,13 +793,16 @@ async fn run_backfill(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let interval =
         parse_duration(&read_flag_value(args, "--interval").unwrap_or_else(|| "1h".to_string()))?;
     let out_path = read_flag_value(args, "--out");
+    let no_output = has_flag(args, "--no-output");
     let concurrency =
         parse_positive_usize(read_flag_value(args, "--concurrency"), DEFAULT_CONCURRENCY)?;
+    let persist_output = validate_output_mode(out_path.as_deref(), no_output)?;
+    let persist_checkpoints = should_persist_checkpoints(persist_output);
 
     let catalog = InstrumentCatalog::from_file(&universe_path)?;
     let selected = catalog.select_active(&symbols)?;
-    let tickers = build_tickers(&selected, interval);
-    let client = Arc::new(build_client_from_catalog(&catalog, &selected));
+    let tickers = build_tickers(&selected, interval)?;
+    let client = Arc::new(build_client_from_catalog(&catalog, &selected, concurrency));
     let checkpoint_store = FileCheckpointStore::open(&checkpoint_path)?;
     let mut sink = create_sink(out_path.as_deref())?;
 
@@ -627,7 +839,7 @@ async fn run_backfill(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
-    if !checkpoint_updates.is_empty() {
+    if persist_checkpoints && !checkpoint_updates.is_empty() {
         checkpoint_store.set_many(&checkpoint_updates)?;
     }
     sink.flush()?;
@@ -651,6 +863,24 @@ async fn run_backfill(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 }
 
 async fn run_update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_update_usage();
+        return Ok(());
+    }
+    validate_flags(
+        args,
+        &[
+            "--universe",
+            "--symbols",
+            "--lookback",
+            "--interval",
+            "--checkpoint",
+            "--out",
+            "--concurrency",
+        ],
+        &["--no-output"],
+    )?;
+
     let universe_path =
         read_flag_value(args, "--universe").unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
     let checkpoint_path = read_flag_value(args, "--checkpoint")
@@ -661,13 +891,16 @@ async fn run_update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let interval =
         parse_duration(&read_flag_value(args, "--interval").unwrap_or_else(|| "1h".to_string()))?;
     let out_path = read_flag_value(args, "--out");
+    let no_output = has_flag(args, "--no-output");
     let concurrency =
         parse_positive_usize(read_flag_value(args, "--concurrency"), DEFAULT_CONCURRENCY)?;
+    let persist_output = validate_output_mode(out_path.as_deref(), no_output)?;
+    let persist_checkpoints = should_persist_checkpoints(persist_output);
 
     let catalog = InstrumentCatalog::from_file(&universe_path)?;
     let selected = catalog.select_active(&symbols)?;
-    let tickers = build_tickers(&selected, interval);
-    let client = Arc::new(build_client_from_catalog(&catalog, &selected));
+    let tickers = build_tickers(&selected, interval)?;
+    let client = Arc::new(build_client_from_catalog(&catalog, &selected, concurrency));
     let checkpoint_store = FileCheckpointStore::open(&checkpoint_path)?;
     let mut sink = create_sink(out_path.as_deref())?;
 
@@ -709,7 +942,7 @@ async fn run_update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if !checkpoint_updates.is_empty() {
+    if persist_checkpoints && !checkpoint_updates.is_empty() {
         checkpoint_store.set_many(&checkpoint_updates)?;
     }
     sink.flush()?;
@@ -730,29 +963,6 @@ async fn run_update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         )
         .into())
     }
-}
-
-fn build_tickers(instruments: &[&InstrumentDefinition], interval: Duration) -> Vec<Ticker> {
-    instruments
-        .iter()
-        .map(|instrument| Ticker::new(&instrument.base, &instrument.quote).interval(interval))
-        .collect()
-}
-
-fn build_client_from_catalog(
-    catalog: &InstrumentCatalog,
-    instruments: &[&InstrumentDefinition],
-) -> ConfiguredClient {
-    DukascopyClientBuilder::new()
-        .respect_market_hours(should_respect_market_hours(instruments))
-        .with_instrument_catalog(catalog)
-        .build()
-}
-
-fn should_respect_market_hours(instruments: &[&InstrumentDefinition]) -> bool {
-    instruments
-        .iter()
-        .all(|instrument| matches!(instrument.asset_class, AssetClass::Fx | AssetClass::Metal))
 }
 
 async fn fetch_backfill_batches(
@@ -895,31 +1105,19 @@ fn spawn_update_job(
     });
 }
 
-fn create_sink(path: Option<&str>) -> Result<Box<dyn DataSink>, Box<dyn std::error::Error>> {
-    match path {
-        Some(path) => {
-            let path_lower = path.to_ascii_lowercase();
-            if path_lower.ends_with(".csv") {
-                return Ok(Box::new(CsvSink::open(path)?));
-            }
-            if path_lower.ends_with(".parquet") {
-                return Ok(Box::new(ParquetSink::open(path)?));
-            }
-            Err(format!(
-                "Unsupported sink format for '{}'. Use .csv or .parquet",
-                path
-            )
-            .into())
-        }
-        None => Ok(Box::new(NoopSink)),
-    }
-}
-
+#[cfg(feature = "sinks-parquet")]
 fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_export_usage();
+        return Ok(());
+    }
+    validate_flags(args, &["--input", "--out"], &["--has-headers"])?;
+
     let input = read_flag_value(args, "--input")
         .ok_or_else(|| "Missing required argument: --input PATH.csv".to_string())?;
     let out = read_flag_value(args, "--out")
         .ok_or_else(|| "Missing required argument: --out PATH.parquet".to_string())?;
+    let has_headers = has_flag(args, "--has-headers");
 
     if !input.to_ascii_lowercase().ends_with(".csv") {
         return Err(format!("Unsupported export input '{}'. Expected .csv", input).into());
@@ -929,25 +1127,24 @@ fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
+        .has_headers(has_headers)
         .from_path(&input)?;
     let mut sink = ParquetSink::open(&out)?;
 
     let mut total_rows = 0usize;
     for (line_no, record_result) in reader.records().enumerate() {
+        let physical_line_no = line_no + if has_headers { 2 } else { 1 };
         let record = record_result.map_err(|err| {
             format!(
                 "Failed to read CSV record at line {} from '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
 
         if record.len() != 9 {
             return Err(format!(
                 "Invalid CSV row at line {} in '{}': expected 9 columns, got {}",
-                line_no + 1,
+                physical_line_no,
                 input,
                 record.len()
             )
@@ -955,14 +1152,18 @@ fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let symbol = record[0].to_string();
-        let pair = CurrencyPair::new(record[1].to_string(), record[2].to_string());
+        let pair =
+            CurrencyPair::try_new(record[1].to_string(), record[2].to_string()).map_err(|err| {
+                format!(
+                    "Invalid pair at line {} in '{}': {}",
+                    physical_line_no, input, err
+                )
+            })?;
         let timestamp = chrono::DateTime::parse_from_rfc3339(&record[3])
             .map_err(|err| {
                 format!(
                     "Invalid timestamp at line {} in '{}': {}",
-                    line_no + 1,
-                    input,
-                    err
+                    physical_line_no, input, err
                 )
             })?
             .with_timezone(&chrono::Utc);
@@ -970,41 +1171,31 @@ fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let rate = Decimal::from_str(&record[4]).map_err(|err| {
             format!(
                 "Invalid rate at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
         let bid = Decimal::from_str(&record[5]).map_err(|err| {
             format!(
                 "Invalid bid at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
         let ask = Decimal::from_str(&record[6]).map_err(|err| {
             format!(
                 "Invalid ask at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
         let bid_volume: f32 = record[7].parse().map_err(|err| {
             format!(
                 "Invalid bid_volume at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
         let ask_volume: f32 = record[8].parse().map_err(|err| {
             format!(
                 "Invalid ask_volume at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
 
@@ -1028,6 +1219,20 @@ fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         input, out, total_rows
     );
     Ok(())
+}
+
+#[cfg(not(feature = "sinks-parquet"))]
+fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_export_usage();
+        return Ok(());
+    }
+
+    let _ = args;
+    Err(
+        "Export command requires 'sinks-parquet' feature. Rebuild with --features sinks-parquet"
+            .into(),
+    )
 }
 
 fn deduplicate_by_timestamp(mut history: Vec<CurrencyExchange>) -> Vec<CurrencyExchange> {
@@ -1089,7 +1294,11 @@ fn parse_duration(value: &str) -> Result<Duration, Box<dyn std::error::Error>> {
         return Err(format!("Invalid duration '{}'", value).into());
     }
 
-    let (num_str, unit) = normalized.split_at(normalized.len() - 1);
+    let (num_str, unit) = if normalized.ends_with("mo") {
+        normalized.split_at(normalized.len() - 2)
+    } else {
+        normalized.split_at(normalized.len() - 1)
+    };
     let amount: i64 = num_str
         .parse()
         .map_err(|_| format!("Invalid duration '{}'", value))?;
@@ -1103,6 +1312,8 @@ fn parse_duration(value: &str) -> Result<Duration, Box<dyn std::error::Error>> {
         "h" => Duration::hours(amount),
         "d" => Duration::days(amount),
         "w" => Duration::weeks(amount),
+        "mo" => Duration::days(amount * 30),
+        "y" => Duration::days(amount * 365),
         _ => return Err(format!("Unsupported duration unit in '{}'", value).into()),
     };
 
@@ -1119,6 +1330,8 @@ mod tests {
         assert_eq!(parse_duration("2h").unwrap(), Duration::hours(2));
         assert_eq!(parse_duration("7d").unwrap(), Duration::days(7));
         assert_eq!(parse_duration("2w").unwrap(), Duration::weeks(2));
+        assert_eq!(parse_duration("1mo").unwrap(), Duration::days(30));
+        assert_eq!(parse_duration("1y").unwrap(), Duration::days(365));
     }
 
     #[test]
@@ -1135,6 +1348,26 @@ mod tests {
         assert_eq!(parse_positive_usize(Some("4".to_string()), 8).unwrap(), 4);
         assert!(parse_positive_usize(Some("0".to_string()), 8).is_err());
         assert!(parse_positive_usize(Some("x".to_string()), 8).is_err());
+    }
+
+    #[test]
+    fn test_validate_flags_rejects_unknown_and_missing_values() {
+        let args = vec!["--unknown".to_string()];
+        assert!(validate_flags(&args, &["--out"], &[]).is_err());
+
+        let args = vec!["--out".to_string()];
+        assert!(validate_flags(&args, &["--out"], &[]).is_err());
+
+        let args = vec!["--out".to_string(), "--next".to_string()];
+        assert!(validate_flags(&args, &["--out"], &["--next"]).is_err());
+    }
+
+    #[test]
+    fn test_validate_output_mode_rules() {
+        assert!(validate_output_mode(Some("data.csv"), false).unwrap());
+        assert!(!validate_output_mode(None, true).unwrap());
+        assert!(validate_output_mode(Some("data.csv"), true).is_err());
+        assert!(validate_output_mode(None, false).is_err());
     }
 
     #[test]
