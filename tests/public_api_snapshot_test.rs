@@ -1,5 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
-use dukascopy_fx::advanced::{ClientConfig, ConfiguredClient, DukascopyClientBuilder, PairResolutionMode};
+use dukascopy_fx::advanced::{
+    ClientConfig, ConfiguredClient, DukascopyClientBuilder, PairResolutionMode,
+};
 use dukascopy_fx::{
     CurrencyExchange, CurrencyPair, DukascopyError, Period, RateRequest, RequestParseMode, Ticker,
 };
@@ -9,14 +11,14 @@ fn assert_future_exchange<F>(future: F)
 where
     F: Future<Output = dukascopy_fx::Result<CurrencyExchange>>,
 {
-    let _ = future;
+    std::mem::drop(future);
 }
 
 fn assert_future_series<F>(future: F)
 where
     F: Future<Output = dukascopy_fx::Result<Vec<CurrencyExchange>>>,
 {
-    let _ = future;
+    std::mem::drop(future);
 }
 
 #[test]

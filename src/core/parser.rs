@@ -97,7 +97,7 @@ impl DukascopyParser {
         if data.is_empty() {
             return Err(DukascopyError::DataNotFound);
         }
-        if !data.len().is_multiple_of(TICK_SIZE_BYTES) {
+        if data.len() % TICK_SIZE_BYTES != 0 {
             return Err(DukascopyError::InvalidTickData);
         }
         Ok(())
