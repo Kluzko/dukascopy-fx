@@ -104,7 +104,11 @@ pub mod time;
 // Core exports
 // ============================================================================
 
-pub use api::{download, download_incremental, download_range, Period, Ticker};
+pub use api::{
+    download, download_incremental, download_incremental_with_concurrency, download_range,
+    download_range_with_concurrency, download_with_concurrency, Period, Ticker,
+    DEFAULT_DOWNLOAD_CONCURRENCY,
+};
 pub use core::catalog::{AssetClass, InstrumentCatalog, InstrumentDefinition};
 pub use error::DukascopyError;
 pub use models::{CurrencyExchange, CurrencyPair, RateRequest, RequestParseMode};
@@ -246,9 +250,9 @@ pub mod advanced {
     pub use crate::core::client::{
         ClientConfig, ConfiguredClient, ConversionMode, ConversionPathType, DukascopyClient,
         DukascopyClientBuilder, PairResolutionMode, ResolvedExchange, DEFAULT_CACHE_SIZE,
-        DEFAULT_MAX_IDLE_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT_REQUESTS, DEFAULT_MAX_RETRIES,
-        DEFAULT_RETRY_BASE_DELAY_MS, DEFAULT_TIMEOUT_SECS, DUKASCOPY_BASE_URL,
-        GLOBAL_DEFAULT_QUOTE_CURRENCY,
+        DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS, DEFAULT_MAX_IDLE_CONNECTIONS,
+        DEFAULT_MAX_IN_FLIGHT_REQUESTS, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_DELAY_MS,
+        DEFAULT_TIMEOUT_SECS, DUKASCOPY_BASE_URL, GLOBAL_DEFAULT_QUOTE_CURRENCY,
     };
     pub use crate::core::instrument::{
         resolve_instrument_config, CurrencyCategory, DefaultInstrumentProvider,
@@ -272,7 +276,11 @@ pub mod advanced {
 /// use dukascopy_fx::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::api::{download, download_incremental, download_range, Period, Ticker};
+    pub use crate::api::{
+        download, download_incremental, download_incremental_with_concurrency, download_range,
+        download_range_with_concurrency, download_with_concurrency, Period, Ticker,
+        DEFAULT_DOWNLOAD_CONCURRENCY,
+    };
     pub use crate::core::catalog::{AssetClass, InstrumentCatalog, InstrumentDefinition};
     pub use crate::error::DukascopyError;
     pub use crate::market::{is_market_open, is_weekend, MarketStatus};

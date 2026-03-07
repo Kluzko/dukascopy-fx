@@ -64,7 +64,7 @@ pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 200;
 pub const DEFAULT_MAX_IN_FLIGHT_REQUESTS: usize = 8;
 
 /// Maximum number of hours to backtrack when resolving at-or-before tick.
-const MAX_AT_OR_BEFORE_BACKTRACK_HOURS: usize = 72;
+pub const DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS: usize = 72;
 
 /// Dukascopy API base URL
 pub const DUKASCOPY_BASE_URL: &str = "https://datafeed.dukascopy.com/datafeed";
@@ -144,6 +144,8 @@ pub struct ClientConfig {
     pub retry_base_delay_ms: u64,
     /// Maximum number of concurrent in-flight HTTP requests
     pub max_in_flight_requests: usize,
+    /// Maximum number of hours to scan backward for at-or-before tick lookup.
+    pub max_at_or_before_backtrack_hours: usize,
     /// Whether market-hours filtering should be applied (FX-style).
     pub respect_market_hours: bool,
     /// Optional default quote currency used for symbol-only requests.
@@ -169,6 +171,7 @@ impl Default for ClientConfig {
             max_retries: DEFAULT_MAX_RETRIES,
             retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
             max_in_flight_requests: DEFAULT_MAX_IN_FLIGHT_REQUESTS,
+            max_at_or_before_backtrack_hours: DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS,
             respect_market_hours: true,
             default_quote_currency: None,
             pair_resolution_mode: PairResolutionMode::default(),
@@ -241,6 +244,14 @@ impl DukascopyClientBuilder {
     /// Sets the maximum number of in-flight HTTP requests.
     pub fn max_in_flight_requests(mut self, max_requests: usize) -> Self {
         self.config.max_in_flight_requests = max_requests;
+        self
+    }
+
+    /// Sets maximum backtrack horizon in hours for at-or-before tick lookup.
+    ///
+    /// Use `0` to disable multi-hour backtracking.
+    pub fn max_at_or_before_backtrack_hours(mut self, hours: usize) -> Self {
+        self.config.max_at_or_before_backtrack_hours = hours;
         self
     }
 
@@ -400,7 +411,7 @@ impl DukascopyClientBuilder {
 pub struct ConfiguredClient {
     config: ClientConfig,
     http_client: Client,
-    cache: Arc<Mutex<LruCache<String, Vec<u8>>>>,
+    cache: Arc<Mutex<LruCache<String, Arc<[u8]>>>>,
     request_limiter: Arc<Semaphore>,
     instrument_provider: Option<OverrideInstrumentProvider>,
 }
@@ -441,7 +452,7 @@ impl ConfiguredClient {
             timestamp.day(),
             timestamp.hour(),
         );
-        self.fetch_cached(&url).await
+        Ok(self.fetch_cached(&url).await?.to_vec())
     }
 
     /// Fetches the exchange rate for a currency pair at a specific timestamp.
@@ -477,7 +488,7 @@ impl ConfiguredClient {
             let data = match self.fetch_cached(&url).await {
                 Ok(data) => data,
                 Err(DukascopyError::DataNotFound) if fallback_attempts > 0 => {
-                    if fallback_attempts >= MAX_AT_OR_BEFORE_BACKTRACK_HOURS {
+                    if fallback_attempts >= self.config.max_at_or_before_backtrack_hours {
                         return Err(DukascopyError::DataNotFound);
                     }
                     query_timestamp = hour_start
@@ -488,17 +499,17 @@ impl ConfiguredClient {
                 }
                 Err(err) => return Err(err),
             };
-            DukascopyParser::validate_decompressed_data(&data)?;
+            DukascopyParser::validate_decompressed_data(data.as_ref())?;
 
             let target_ms = DukascopyClient::timestamp_to_ms_from_hour(query_timestamp);
-            match DukascopyClient::find_tick_at_or_before(&data, target_ms, config) {
+            match DukascopyClient::find_tick_at_or_before(data.as_ref(), target_ms, config) {
                 Ok(tick) => {
                     return DukascopyClient::build_exchange_response(
                         pair, hour_start, tick, config,
                     );
                 }
                 Err(DukascopyError::DataNotFound) => {
-                    if fallback_attempts >= MAX_AT_OR_BEFORE_BACKTRACK_HOURS {
+                    if fallback_attempts >= self.config.max_at_or_before_backtrack_hours {
                         return Err(DukascopyError::DataNotFound);
                     }
                     query_timestamp = hour_start
@@ -783,6 +794,14 @@ impl ConfiguredClient {
             };
 
             if exchange.is_none() {
+                if let Some(previous) = results.last() {
+                    if previous.timestamp <= current {
+                        exchange = Some(previous.clone());
+                    }
+                }
+            }
+
+            if exchange.is_none() {
                 let fallback_ts = current
                     .checked_sub_signed(Duration::milliseconds(1))
                     .ok_or(DukascopyError::DataNotFound)?;
@@ -822,7 +841,7 @@ impl ConfiguredClient {
     }
 
     /// Fetches data from URL with caching.
-    async fn fetch_cached(&self, url: &str) -> Result<Vec<u8>, DukascopyError> {
+    async fn fetch_cached(&self, url: &str) -> Result<Arc<[u8]>, DukascopyError> {
         // Check cache first
         {
             let mut cache_guard = self
@@ -832,7 +851,7 @@ impl ConfiguredClient {
 
             if let Some(data) = cache_guard.get(url) {
                 debug!("Cache hit for: {}", url);
-                return Ok(data.clone());
+                return Ok(Arc::clone(data));
             }
         }
 
@@ -931,6 +950,7 @@ impl ConfiguredClient {
         }
 
         debug!("Fetched and decompressed {} bytes", decompressed.len());
+        let decompressed: Arc<[u8]> = decompressed.into();
 
         // Cache the result
         {
@@ -938,7 +958,7 @@ impl ConfiguredClient {
                 .cache
                 .lock()
                 .map_err(|e| DukascopyError::CacheError(format!("Cache lock poisoned: {}", e)))?;
-            cache_guard.put(url.to_string(), decompressed.clone());
+            cache_guard.put(url.to_string(), Arc::clone(&decompressed));
         }
 
         Ok(decompressed)
@@ -1048,7 +1068,7 @@ impl DukascopyClient {
 
     /// Fetches cached data from URL.
     pub async fn get_cached_data(url: &str) -> Result<Vec<u8>, DukascopyError> {
-        get_default_client().await.fetch_cached(url).await
+        Ok(get_default_client().await.fetch_cached(url).await?.to_vec())
     }
 
     /// Clears the global cache.
@@ -1318,6 +1338,10 @@ mod tests {
             config.max_in_flight_requests,
             DEFAULT_MAX_IN_FLIGHT_REQUESTS
         );
+        assert_eq!(
+            config.max_at_or_before_backtrack_hours,
+            DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS
+        );
         assert!(config.respect_market_hours);
         assert_eq!(
             config.pair_resolution_mode,
@@ -1348,6 +1372,7 @@ mod tests {
             .max_retries(5)
             .retry_base_delay_ms(150)
             .max_in_flight_requests(4)
+            .max_at_or_before_backtrack_hours(24)
             .respect_market_hours(false)
             .default_quote_currency("pln")
             .pair_resolution_mode(PairResolutionMode::ExplicitOrDefaultQuote)
@@ -1361,6 +1386,7 @@ mod tests {
         assert_eq!(client.config().max_retries, 5);
         assert_eq!(client.config().retry_base_delay_ms, 150);
         assert_eq!(client.config().max_in_flight_requests, 4);
+        assert_eq!(client.config().max_at_or_before_backtrack_hours, 24);
         assert!(!client.config().respect_market_hours);
         assert_eq!(client.default_quote_currency(), Some("PLN"));
         assert_eq!(

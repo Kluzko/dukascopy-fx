@@ -9,7 +9,8 @@ use chrono::{DateTime, Duration, Utc};
 use futures::stream::{self, StreamExt, TryStreamExt};
 use std::str::FromStr;
 
-const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
+/// Default maximum number of concurrent ticker download tasks.
+pub const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
 
 /// Typed period for historical queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,11 +453,20 @@ pub async fn download(
     tickers: &[Ticker],
     period: &str,
 ) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    download_with_concurrency(tickers, period, DEFAULT_DOWNLOAD_CONCURRENCY).await
+}
+
+/// Downloads historical data for multiple tickers with custom concurrency limit.
+pub async fn download_with_concurrency(
+    tickers: &[Ticker],
+    period: &str,
+    max_concurrency: usize,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
     if tickers.is_empty() {
         return Ok(Vec::new());
     }
 
-    let concurrency = tickers.len().clamp(1, DEFAULT_DOWNLOAD_CONCURRENCY);
+    let concurrency = resolve_download_concurrency(tickers.len(), max_concurrency)?;
     let period = period.to_string();
     let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> =
         stream::iter(tickers.iter().cloned().enumerate().map(|(index, ticker)| {
@@ -483,11 +493,21 @@ pub async fn download_range(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    download_range_with_concurrency(tickers, start, end, DEFAULT_DOWNLOAD_CONCURRENCY).await
+}
+
+/// Downloads historical data with custom date range and concurrency limit.
+pub async fn download_range_with_concurrency(
+    tickers: &[Ticker],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    max_concurrency: usize,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
     if tickers.is_empty() {
         return Ok(Vec::new());
     }
 
-    let concurrency = tickers.len().clamp(1, DEFAULT_DOWNLOAD_CONCURRENCY);
+    let concurrency = resolve_download_concurrency(tickers.len(), max_concurrency)?;
     let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
         tickers
             .iter()
@@ -515,11 +535,22 @@ pub async fn download_incremental<S: CheckpointStore>(
     store: &S,
     lookback: Duration,
 ) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    download_incremental_with_concurrency(tickers, store, lookback, DEFAULT_DOWNLOAD_CONCURRENCY)
+        .await
+}
+
+/// Incrementally downloads data for multiple tickers with custom concurrency limit.
+pub async fn download_incremental_with_concurrency<S: CheckpointStore>(
+    tickers: &[Ticker],
+    store: &S,
+    lookback: Duration,
+    max_concurrency: usize,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
     if tickers.is_empty() {
         return Ok(Vec::new());
     }
 
-    let concurrency = tickers.len().clamp(1, DEFAULT_DOWNLOAD_CONCURRENCY);
+    let concurrency = resolve_download_concurrency(tickers.len(), max_concurrency)?;
     let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
         tickers
             .iter()
@@ -545,6 +576,19 @@ fn deduplicate_by_timestamp(mut history: Vec<CurrencyExchange>) -> Vec<CurrencyE
     history.sort_by_key(|rate| rate.timestamp);
     history.dedup_by_key(|rate| rate.timestamp);
     history
+}
+
+fn resolve_download_concurrency(
+    num_tickers: usize,
+    max_concurrency: usize,
+) -> Result<usize, DukascopyError> {
+    if max_concurrency == 0 {
+        return Err(DukascopyError::InvalidRequest(
+            "Download concurrency must be at least 1".to_string(),
+        ));
+    }
+
+    Ok(num_tickers.clamp(1, max_concurrency))
 }
 
 // ============================================================================
@@ -832,5 +876,30 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_with_concurrency_rejects_zero_limit() {
+        let ticker = Ticker::new("EUR", "USD");
+        let result = download_with_concurrency(&[ticker], "1d", 0).await;
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_download_range_with_concurrency_rejects_zero_limit() {
+        let ticker = Ticker::new("EUR", "USD");
+        let start = Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 1, 0, 0).unwrap();
+        let result = download_range_with_concurrency(&[ticker], start, end, 0).await;
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_download_incremental_with_concurrency_rejects_zero_limit() {
+        let store = InMemoryCheckpointStore::default();
+        let ticker = Ticker::new("EUR", "USD");
+        let result =
+            download_incremental_with_concurrency(&[ticker], &store, Duration::hours(1), 0).await;
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
     }
 }
