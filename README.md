@@ -34,6 +34,7 @@ async fn main() -> dukascopy_fx::Result<()> {
 - typed period API (`Period`) and tuned batch concurrency
 - checkpoint-driven incremental updates
 - CLI fetcher for repeatable data jobs
+- dataframe-friendly interop helpers (`flatten_rows`, `FlatExchangeRow`)
 
 ## Copy-Paste Workflows
 
@@ -173,6 +174,7 @@ LIVE_TESTS=1 cargo test --test integration_test
 - API stability policy: [`docs/API_STABILITY.md`](docs/API_STABILITY.md)
 - Benchmark methodology: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
 - CLI config reference: [`docs/CLI_CONFIG.md`](docs/CLI_CONFIG.md)
+- Dataframe integrations: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)
 - Roadmap: [`ROADMAP.md`](ROADMAP.md)
 - Release notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 

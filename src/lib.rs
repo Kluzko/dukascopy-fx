@@ -94,6 +94,7 @@ pub(crate) mod core;
 // ============================================================================
 
 pub mod error;
+pub mod interop;
 pub mod macros;
 pub mod market;
 pub mod models;
@@ -112,6 +113,7 @@ pub use api::{
 };
 pub use core::catalog::{AssetClass, InstrumentCatalog, InstrumentDefinition};
 pub use error::DukascopyError;
+pub use interop::{flatten_row, flatten_rows, FlatExchangeRow};
 pub use models::{CurrencyExchange, CurrencyPair, RateRequest, RequestParseMode};
 pub use storage::checkpoint::{CheckpointStore, FileCheckpointStore};
 #[cfg(feature = "sinks-parquet")]
