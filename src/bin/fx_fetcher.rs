@@ -1322,6 +1322,10 @@ fn parse_duration(value: &str) -> Result<Duration, Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    use dukascopy_fx::CurrencyPair;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
     use super::*;
 
     #[test]
@@ -1375,7 +1379,7 @@ mod tests {
         let ts = Utc::now();
         let rows = vec![
             CurrencyExchange {
-                pair: CurrencyPair::new("EUR", "USD"),
+                pair: CurrencyPair::try_new("EUR", "USD").unwrap(),
                 rate: Decimal::from_str("1.10000").unwrap(),
                 timestamp: ts,
                 ask: Decimal::from_str("1.10010").unwrap(),
