@@ -22,7 +22,7 @@ CLI tooling exists, but is secondary.
 
 ```toml
 [dependencies]
-dukascopy-fx = "0.4.1"
+dukascopy-fx = "0.5.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -138,7 +138,7 @@ let rows = ticker.fetch_incremental(&store, Duration::days(7)).await?;
 println!("fetched {} rows", rows.len());
 ```
 
-## Public API (0.4.1)
+## Public API (0.5.0)
 
 Most-used free functions:
 - `get_rate(from, to, timestamp)`
