@@ -7,95 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `RequestParseMode` and `RateRequest::parse_with_mode(...)` for explicit input parsing semantics.
-- `get_rate_for_input_with_mode(...)` for one-shot strict request parsing + fetch.
-- Typed period support for ticker history via `Period` and `history_period(...)` methods.
-- Concurrency-tunable batch helpers:
-  - `download_with_concurrency(...)`
-  - `download_range_with_concurrency(...)`
-  - `download_incremental_with_concurrency(...)`
-- Client backtrack-horizon configuration:
-  - `DukascopyClientBuilder::max_at_or_before_backtrack_hours(...)`
-  - `DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS`
-  - `DEFAULT_DOWNLOAD_CONCURRENCY`
-- Client-scoped batch helpers that read concurrency from client config:
-  - `download_with_client(...)`
-  - `download_range_with_client(...)`
-  - `download_incremental_with_client(...)`
-- Non-panicking convenience macros:
-  - `try_datetime!(...)`
-  - `try_ticker!(...)`
-- `time::try_datetime_utc(...)` as non-panicking companion for `datetime_utc`.
-
-### Changed
-
-- Internal cache payloads are now shared (`Arc<[u8]>`) to reduce clone pressure on cache hits.
-- Range fallback prefers previously resolved samples before triggering additional network lookups.
-- Range fallback caches per-hour fallback lookups to avoid repeated network backtracking inside the same hour.
-- Integration tests are now opt-in at runtime (`LIVE_TESTS=1`) to reduce default CI/local flakiness.
-- Public helper functions (`get_rate`, `get_rates_range`) now validate pair codes eagerly via `CurrencyPair::try_new`.
-- Default Tokio dependency surface reduced (replaced `tokio/full` with explicit runtime/sync/time features).
-- `arrow`/`parquet` are now optional behind `sinks-parquet` feature.
-- `fx_fetcher` now builds without `sinks-parquet`; parquet operations return a clear feature-gating error.
-- `fx_fetcher` CLI now enforces strict flag validation and missing-value detection.
-- `fx_fetcher` scraping uses XML/HTML parsers (`quick-xml`, `scraper`) instead of manual string scanning.
-- `fx_fetcher` `--concurrency` now configures both client in-flight limits and batch worker fan-out.
-- `fx_fetcher` duration parser accepts `mo` and `y` units in addition to `m/h/d/w`.
-
 ### Documentation
 
-- README updated with strict request parsing, typed periods, concurrency controls, and live test instructions.
-- README updated with feature-flag guidance (`sinks-parquet`) and validated constructor preference.
-
-### Fixed
-
-- Transport failures now emit structured `DukascopyError::Transport { kind, status, message }`.
-- `DataNotFoundFor` is now emitted by at-or-before lookup exhaustion paths.
-- `fx_fetcher` prevents silent data-loss trap by requiring explicit output mode (`--out` or `--no-output`) and skipping checkpoint writes in `--no-output`.
-- `fx_fetcher export` supports CSV headers via `--has-headers` and validates pair codes during conversion.
-
-### Removed
-
-- Removed unused `DukascopyError::MarketClosed` variant.
+- Changelog is the canonical release source; removed separate `RELEASE_NOTES.md` to avoid duplication.
 
 ## [0.5.0] - 2026-03-07
 
 ### Added
 
-- Interop adapter API for analytics pipelines:
-  - `FlatExchangeRow`
-  - `flatten_row(...)`
-  - `flatten_rows(...)`
-- New CLI global options:
-  - `--config PATH.toml` for command defaults
-  - `--json` for machine-readable summaries/errors
-- Public API snapshot contract test (`tests/public_api_snapshot_test.rs`).
-- Benchmark harness (`benches/core_benchmarks.rs`) and methodology docs.
-- CI workflow matrix (`stable`, `beta`, `MSRV`) with quality/supply-chain jobs.
-
-### Fixed
-
-- Feature flags: `cargo check --no-default-features` now compiles correctly.
-- Tick selection now enforces strict at-or-before semantics (no look-ahead), with bounded backward fallback.
-- Range/history retrieval fallback improved for sparse-hour data.
-- Storage sinks now return explicit conversion errors instead of silently writing `0.0`.
-- Checkpoint file replacement hardened for filesystems where rename-over-existing can fail.
-- Integration tests now run serialized to reduce flaky network failures under parallel load.
+- API: explicit request parsing controls via `RequestParseMode`, `RateRequest::parse_with_mode(...)`, and `get_rate_for_input_with_mode(...)`.
+- API: typed ticker periods via `Period`, `history_period(...)`, and `history_period_from_end(...)`.
+- API: concurrency-aware batch helpers (`download_with_concurrency(...)`, `download_range_with_concurrency(...)`, `download_incremental_with_concurrency(...)`).
+- API: client-scoped batch helpers (`download_with_client(...)`, `download_range_with_client(...)`, `download_incremental_with_client(...)`).
+- API: client policy controls (`max_at_or_before_backtrack_hours(...)`, `DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS`, `DEFAULT_DOWNLOAD_CONCURRENCY`).
+- API: non-panicking convenience helpers (`try_datetime!(...)`, `try_ticker!(...)`, `time::try_datetime_utc(...)`).
+- Interop: dataframe adapter API (`FlatExchangeRow`, `flatten_row(...)`, `flatten_rows(...)`).
+- CLI: global options `--config PATH.toml` and `--json`.
+- Quality: public API snapshot test (`tests/public_api_snapshot_test.rs`).
+- Perf: benchmark harness (`benches/core_benchmarks.rs`).
+- CI: matrix jobs for `stable`, `beta`, and `MSRV`.
 
 ### Changed
 
-- Batch download APIs now run with bounded concurrency while preserving input order.
-- Unified request parsing: recognized 6-letter FX shorthand (e.g. `EURUSD`) now resolves to explicit pair requests.
-- Client HTTP setup now uses no-proxy builder path for better headless/runtime portability.
-- `fx_fetcher` now supports config-driven defaults and JSON output mode for automation use cases.
+- Cache payloads are shared (`Arc<[u8]>`) to reduce clone pressure on hot paths.
+- Range fallback now reuses previously resolved values and per-hour fallback lookups.
+- Batch download APIs run with bounded concurrency while preserving input order.
+- Unified request parsing recognizes six-letter FX shorthand (for example `EURUSD`) as explicit pair requests.
+- Public helper functions validate pair codes eagerly via `CurrencyPair::try_new`.
+- Default dependency surface reduced (replaced `tokio/full` with explicit Tokio runtime features).
+- `arrow`/`parquet` moved behind optional `sinks-parquet`.
+- `fx_fetcher` now builds without `sinks-parquet`; parquet paths return clear feature-gating errors.
+- `fx_fetcher` now enforces strict flag validation and explicit output mode (`--out` or `--no-output`).
+- `fx_fetcher` concurrency now configures both worker fan-out and client in-flight limits.
+- `fx_fetcher` duration parser accepts `mo` and `y`.
+- `fx_fetcher` sitemap/category discovery now uses parser-based XML/HTML extraction.
+- HTTP client setup now uses no-proxy builder path for headless/runtime portability.
+- Live integration suite is now opt-in (`LIVE_TESTS=1`) to reduce default CI/local flakiness.
+
+### Fixed
+
+- `cargo check --no-default-features` compatibility.
+- Tick lookup now enforces strict at-or-before semantics (no look-ahead), with bounded backward fallback.
+- Range/history fallback behavior for sparse data windows.
+- Storage sinks now return explicit conversion errors instead of silent `0.0` values.
+- Checkpoint file replacement hardened for filesystems where rename-over-existing may fail.
+- `DukascopyError::Transport { kind, status, message }` now carries structured transport failures.
+- `DataNotFoundFor` is emitted by at-or-before exhaustion paths.
+- `fx_fetcher` data-loss trap fixed: no checkpoint advance in `--no-output` mode.
+- `fx_fetcher export` now supports `--has-headers` and validates pair codes.
 
 ### Documentation
 
-- README redesigned for adoption (quickstart, copy-paste workflows, feature matrix, FAQ).
-- Added docs: API stability policy, CLI config reference, dataframe integrations, benchmark guide.
-- Added `RELEASE_NOTES.md` and `ROADMAP.md`.
+- README redesigned for adoption with 30-second quickstart, copy-paste workflows, feature matrix, and FAQ.
+- API rustdocs expanded for `Ticker`, `Period`, and `ClientConfig`.
+- Added docs: `docs/API_STABILITY.md`, `docs/CLI_CONFIG.md`, `docs/BENCHMARKS.md`, `docs/INTEGRATIONS.md`, and `ROADMAP.md`.
+
+### Removed
+
+- Removed unused `DukascopyError::MarketClosed` variant.
 
 ## [0.4.0] - 2026-02-23
 

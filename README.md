@@ -138,9 +138,7 @@ Advanced client configuration:
 - commands use strict flag validation (unknown flags are errors)
 
 `backfill/update` fails with output-mode error
-- pass exactly one mode:
-- `--out PATH` for persistence
-- `--no-output` for dry fetch (checkpoints are not advanced)
+- pass exactly one mode: `--out PATH` (persist) or `--no-output` (dry fetch, no checkpoint advance)
 
 `Parquet sink requires feature`
 - build with `--features sinks-parquet`
@@ -171,12 +169,12 @@ LIVE_TESTS=1 cargo test --test integration_test
 
 ## Project docs
 
+- Changelog (release history): [`CHANGELOG.md`](CHANGELOG.md)
 - API stability policy: [`docs/API_STABILITY.md`](docs/API_STABILITY.md)
 - Benchmark methodology: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
 - CLI config reference: [`docs/CLI_CONFIG.md`](docs/CLI_CONFIG.md)
 - Dataframe integrations: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)
 - Roadmap: [`ROADMAP.md`](ROADMAP.md)
-- Release notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 
 ## License
 
