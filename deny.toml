@@ -7,6 +7,8 @@ ignore = [
   "RUSTSEC-2025-0134",
   # Transitive through parquet; crate archived upstream and no patched replacement in this dep chain yet.
   "RUSTSEC-2024-0436",
+  # Transitive through scraper/selectors; no safe upgrade path in this dependency chain yet.
+  "RUSTSEC-2025-0057",
 ]
 
 [licenses]

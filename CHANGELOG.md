@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI hardened with least-privilege token permissions, workflow concurrency cancellation, job timeouts, lockfile-enforced Cargo commands, and faster supply-chain tool install via `taiki-e/install-action@v2`.
 - `cargo-deny` advisory exception added for `RUSTSEC-2025-0134` (`rustls-pemfile`) because it is transitive via `reqwest` and currently has no safe upgrade path.
 - `cargo-deny` advisory exception added for `RUSTSEC-2024-0436` (`paste`) because it is transitive via `parquet` and currently has no maintained replacement in this dependency chain.
+- Dependency refresh (`cargo update`) to latest compatible crate versions.
+- `env_logger` upgraded to `0.11` (removes deprecated `atty` dependency path).
+- `cargo-deny` advisory exception added for `RUSTSEC-2025-0057` (`fxhash`) because it is transitive via `scraper/selectors` and currently has no safe upgrade path.
 
 ## [0.5.0] - 2026-03-07
 
