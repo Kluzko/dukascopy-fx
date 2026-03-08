@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - MSRV raised from `1.76` to `1.83` (transitive dependency toolchain requirement).
 - CI hardened with least-privilege token permissions, workflow concurrency cancellation, job timeouts, lockfile-enforced Cargo commands, and faster supply-chain tool install via `taiki-e/install-action@v2`.
+- `cargo-deny` advisory exception added for `RUSTSEC-2025-0134` (`rustls-pemfile`) because it is transitive via `reqwest` and currently has no safe upgrade path.
 
 ## [0.5.0] - 2026-03-07
 

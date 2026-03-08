@@ -2,7 +2,10 @@
 all-features = true
 
 [advisories]
-ignore = []
+ignore = [
+  # Transitive through reqwest; no maintained drop-in replacement is available yet.
+  "RUSTSEC-2025-0134",
+]
 
 [licenses]
 version = 2
