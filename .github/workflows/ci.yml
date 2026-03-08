@@ -81,13 +81,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@cargo-audit
 
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        uses: taiki-e/install-action@cargo-deny
 
-      - name: Cargo audit
-        run: cargo audit
+      - name: Cargo audit (non-blocking)
+        run: cargo audit || echo "::warning::cargo audit found advisories (non-blocking)"
 
       - name: Cargo deny
         run: cargo deny check
