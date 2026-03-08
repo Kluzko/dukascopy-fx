@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Changelog is the canonical release source; removed separate `RELEASE_NOTES.md` to avoid duplication.
 
+### Changed
+
+- MSRV raised from `1.76` to `1.83` (transitive dependency toolchain requirement).
+- CI hardened with least-privilege token permissions, workflow concurrency cancellation, job timeouts, lockfile-enforced Cargo commands, and faster supply-chain tool install via `taiki-e/install-action@v2`.
+
 ## [0.5.0] - 2026-03-07
 
 ### Added

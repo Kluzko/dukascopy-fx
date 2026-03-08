@@ -6,10 +6,22 @@ on:
     branches:
       - main
       - release/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   stable-quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,34 +33,41 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-stable
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
 
       - name: Format
         run: cargo fmt --all -- --check
 
       - name: Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Minimal feature build check
+        run: cargo check --no-default-features --locked
 
       - name: Unit tests
-        run: cargo test --lib
+        run: cargo test --lib --locked
 
       - name: Public API snapshot
-        run: cargo test --test public_api_snapshot_test
+        run: cargo test --test public_api_snapshot_test --locked
 
       - name: Public API offline contract
-        run: cargo test --test public_api_offline_test -- --test-threads=1
+        run: cargo test --test public_api_offline_test --locked -- --test-threads=1
 
       - name: Binary tests
-        run: cargo test --bin fx_fetcher
+        run: cargo test --bin fx_fetcher --locked
 
       - name: Doc tests
-        run: cargo test --doc
+        run: cargo test --doc --locked
 
   compatibility:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [beta, "1.76.0"]
+        toolchain: [beta, "1.83.0"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,16 +79,16 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-
-      - name: Remove lockfile for old Cargo compatibility
-        if: matrix.toolchain == '1.76.0'
-        run: rm -f Cargo.lock
+        with:
+          shared-key: ci-${{ runner.os }}-${{ matrix.toolchain }}
+          save-if: ${{ github.event_name == 'push' }}
 
       - name: Build check
-        run: cargo check --all-targets --all-features
+        run: cargo check --all-targets --all-features --locked
 
   supply-chain:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,15 +98,18 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-supply-chain
+          save-if: ${{ github.event_name == 'push' }}
 
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
-
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@cargo-deny
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+          fallback: none
 
       - name: Cargo audit (non-blocking)
-        run: cargo audit || echo "::warning::cargo audit found advisories (non-blocking)"
+        run: cargo audit || echo "::warning title=cargo-audit::advisories found (non-blocking)"
 
       - name: Cargo deny
-        run: cargo deny check
+        run: cargo deny --all-features check
