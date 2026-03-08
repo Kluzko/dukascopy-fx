@@ -1,6 +1,8 @@
 //! Data models for currency pairs and exchange rates.
 
-use crate::core::instrument::{resolve_instrument_config, HasInstrumentConfig, InstrumentConfig};
+use crate::core::instrument::{
+    resolve_instrument_config, CurrencyCategory, HasInstrumentConfig, InstrumentConfig,
+};
 use crate::error::DukascopyError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -40,6 +42,19 @@ pub enum RateRequest {
     Symbol(String),
 }
 
+/// Parsing strategy for request input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestParseMode {
+    /// Best-effort parsing: slash pairs first, then known FX shorthand, otherwise symbol.
+    #[default]
+    Auto,
+    /// Require pair parsing semantics.
+    PairOnly,
+    /// Require symbol parsing semantics.
+    SymbolOnly,
+}
+
 impl RateRequest {
     /// Creates a pair request.
     pub fn pair(from: impl Into<String>, to: impl Into<String>) -> Self {
@@ -68,6 +83,55 @@ impl RateRequest {
             Self::Symbol(symbol) => Some(symbol),
         }
     }
+
+    /// Parses a request with an explicit parse mode.
+    pub fn parse_with_mode(input: &str, mode: RequestParseMode) -> Result<Self, DukascopyError> {
+        let normalized = input.trim();
+        if normalized.is_empty() {
+            return Err(DukascopyError::InvalidRequest(
+                "Request cannot be empty".to_string(),
+            ));
+        }
+
+        match mode {
+            RequestParseMode::Auto => {
+                if normalized.contains('/') {
+                    return Ok(Self::Pair(CurrencyPair::from_str(normalized)?));
+                }
+
+                if is_likely_forex_pair_shorthand(normalized) {
+                    return Ok(Self::Pair(CurrencyPair::try_new(
+                        &normalized[0..3],
+                        &normalized[3..6],
+                    )?));
+                }
+
+                Self::symbol(normalized)
+            }
+            RequestParseMode::PairOnly => {
+                if normalized.contains('/') {
+                    return Ok(Self::Pair(CurrencyPair::from_str(normalized)?));
+                }
+
+                if normalized.len() == 6
+                    && normalized
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() && !ch.is_ascii_digit())
+                {
+                    return Ok(Self::Pair(CurrencyPair::try_new(
+                        &normalized[0..3],
+                        &normalized[3..6],
+                    )?));
+                }
+
+                Err(DukascopyError::InvalidRequest(format!(
+                    "PairOnly parsing expected 'BASE/QUOTE' or 6-letter pair shorthand, got '{}'",
+                    normalized
+                )))
+            }
+            RequestParseMode::SymbolOnly => Self::symbol(normalized),
+        }
+    }
 }
 
 impl fmt::Display for RateRequest {
@@ -92,21 +156,24 @@ impl FromStr for RateRequest {
     ///
     /// Rules:
     /// - input containing `/` is parsed as explicit pair, e.g. `EUR/USD`
-    /// - otherwise input is parsed as symbol, e.g. `AAPL`, `EURUSD`, `USA500IDX`
+    /// - 6-letter FX shorthand (e.g. `EURUSD`, `XAUUSD`) is parsed as pair
+    /// - otherwise input is parsed as symbol, e.g. `AAPL`, `USA500IDX`
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let normalized = input.trim();
-        if normalized.is_empty() {
-            return Err(DukascopyError::InvalidRequest(
-                "Request cannot be empty".to_string(),
-            ));
-        }
-
-        if normalized.contains('/') {
-            return Ok(Self::Pair(CurrencyPair::from_str(normalized)?));
-        }
-
-        Self::symbol(normalized)
+        Self::parse_with_mode(input, RequestParseMode::Auto)
     }
+}
+
+fn is_likely_forex_pair_shorthand(input: &str) -> bool {
+    let normalized = input.trim().to_ascii_uppercase();
+    if normalized.len() != 6 || !normalized.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    let from = &normalized[0..3];
+    let to = &normalized[3..6];
+
+    !matches!(CurrencyCategory::from_code(from), CurrencyCategory::Unknown)
+        && !matches!(CurrencyCategory::from_code(to), CurrencyCategory::Unknown)
 }
 
 impl CurrencyPair {
@@ -514,9 +581,49 @@ mod tests {
         }
 
         #[test]
-        fn test_parse_symbol_like_forex_without_slash() {
+        fn test_parse_forex_shorthand_without_slash() {
             let request: RateRequest = "eurusd".parse().unwrap();
-            assert_eq!(request.as_symbol(), Some("EURUSD"));
+            let pair = request.as_pair().unwrap();
+            assert_eq!(pair.from(), "EUR");
+            assert_eq!(pair.to(), "USD");
+        }
+
+        #[test]
+        fn test_parse_non_fx_six_char_code_as_symbol() {
+            let request: RateRequest = "aaplus".parse().unwrap();
+            assert_eq!(request.as_symbol(), Some("AAPLUS"));
+        }
+
+        #[test]
+        fn test_parse_with_mode_pair_only() {
+            let request =
+                RateRequest::parse_with_mode("EURUSD", RequestParseMode::PairOnly).unwrap();
+            let pair = request.as_pair().unwrap();
+            assert_eq!(pair.from(), "EUR");
+            assert_eq!(pair.to(), "USD");
+        }
+
+        #[test]
+        fn test_parse_with_mode_pair_only_rejects_symbol() {
+            let err = RateRequest::parse_with_mode("AAPL", RequestParseMode::PairOnly).unwrap_err();
+            assert!(matches!(err, DukascopyError::InvalidRequest(_)));
+        }
+
+        #[test]
+        fn test_parse_with_mode_symbol_only() {
+            let request =
+                RateRequest::parse_with_mode("aapl", RequestParseMode::SymbolOnly).unwrap();
+            assert_eq!(request.as_symbol(), Some("AAPL"));
+        }
+
+        #[test]
+        fn test_parse_with_mode_symbol_only_rejects_pair_format() {
+            let err =
+                RateRequest::parse_with_mode("EUR/USD", RequestParseMode::SymbolOnly).unwrap_err();
+            assert!(matches!(
+                err,
+                DukascopyError::InvalidCurrencyCode { code, .. } if code == "EUR/USD"
+            ));
         }
 
         #[test]

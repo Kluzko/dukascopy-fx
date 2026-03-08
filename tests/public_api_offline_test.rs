@@ -1,6 +1,7 @@
 use chrono::{TimeZone, Utc};
 use dukascopy_fx::advanced::{DukascopyClientBuilder, PairResolutionMode};
-use dukascopy_fx::{CurrencyPair, DukascopyError, RateRequest};
+use dukascopy_fx::{CurrencyPair, DukascopyError, Period, RateRequest, RequestParseMode};
+use std::str::FromStr;
 
 fn sample_ts() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2025, 1, 3, 14, 45, 0).unwrap()
@@ -18,6 +19,17 @@ fn test_rate_request_from_str_selects_symbol_path() {
     let request: RateRequest = "aapl".parse().unwrap();
     assert_eq!(request.as_symbol(), Some("AAPL"));
     assert_eq!(request.to_string(), "AAPL");
+}
+
+#[test]
+fn test_rate_request_parse_with_mode_pair_only_rejects_symbol() {
+    let err = RateRequest::parse_with_mode("AAPL", RequestParseMode::PairOnly).unwrap_err();
+    assert!(matches!(err, DukascopyError::InvalidRequest(_)));
+}
+
+#[test]
+fn test_period_type_is_public_and_parsable() {
+    assert_eq!(Period::from_str("1d").unwrap(), Period::Days(1));
 }
 
 #[test]

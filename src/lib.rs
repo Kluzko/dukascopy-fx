@@ -94,6 +94,7 @@ pub(crate) mod core;
 // ============================================================================
 
 pub mod error;
+pub mod interop;
 pub mod macros;
 pub mod market;
 pub mod models;
@@ -104,12 +105,20 @@ pub mod time;
 // Core exports
 // ============================================================================
 
-pub use api::{download, download_incremental, download_range, Ticker};
+pub use api::{
+    download, download_incremental, download_incremental_with_client,
+    download_incremental_with_concurrency, download_range, download_range_with_client,
+    download_range_with_concurrency, download_with_client, download_with_concurrency, Period,
+    Ticker, DEFAULT_DOWNLOAD_CONCURRENCY,
+};
 pub use core::catalog::{AssetClass, InstrumentCatalog, InstrumentDefinition};
 pub use error::DukascopyError;
-pub use models::{CurrencyExchange, CurrencyPair, RateRequest};
+pub use interop::{flatten_row, flatten_rows, FlatExchangeRow};
+pub use models::{CurrencyExchange, CurrencyPair, RateRequest, RequestParseMode};
 pub use storage::checkpoint::{CheckpointStore, FileCheckpointStore};
-pub use storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
+#[cfg(feature = "sinks-parquet")]
+pub use storage::sink::ParquetSink;
+pub use storage::sink::{CsvSink, DataSink, NoopSink};
 
 /// Convenient alias for [`DukascopyError`]
 pub type Error = DukascopyError;
@@ -126,7 +135,7 @@ use chrono::{DateTime, Duration, Utc};
 /// Fetches the exchange rate for a currency pair at a specific timestamp.
 #[inline]
 pub async fn get_rate(from: &str, to: &str, timestamp: DateTime<Utc>) -> Result<CurrencyExchange> {
-    let pair = CurrencyPair::new(from, to);
+    let pair = CurrencyPair::try_new(from, to)?;
     core::client::DukascopyClient::get_exchange_rate(&pair, timestamp).await
 }
 
@@ -143,10 +152,22 @@ pub async fn get_rate_for_request(
 ///
 /// Parsing rules:
 /// - input containing `/` is parsed as pair (e.g. `EUR/USD`)
-/// - otherwise input is parsed as symbol (e.g. `AAPL`, `EURUSD`)
+/// - 6-letter FX shorthand (e.g. `EURUSD`, `XAUUSD`) is parsed as pair
+/// - otherwise input is parsed as symbol (e.g. `AAPL`, `USA500IDX`)
 #[inline]
 pub async fn get_rate_for_input(input: &str, timestamp: DateTime<Utc>) -> Result<CurrencyExchange> {
     let request: RateRequest = input.parse()?;
+    get_rate_for_request(&request, timestamp).await
+}
+
+/// Parses request from input using explicit parse mode and fetches exchange rate.
+#[inline]
+pub async fn get_rate_for_input_with_mode(
+    input: &str,
+    mode: RequestParseMode,
+    timestamp: DateTime<Utc>,
+) -> Result<CurrencyExchange> {
+    let request = RateRequest::parse_with_mode(input, mode)?;
     get_rate_for_request(&request, timestamp).await
 }
 
@@ -168,7 +189,7 @@ pub async fn get_rates_range(
     end: DateTime<Utc>,
     interval: Duration,
 ) -> Result<Vec<CurrencyExchange>> {
-    let pair = CurrencyPair::new(from, to);
+    let pair = CurrencyPair::try_new(from, to)?;
     core::client::DukascopyClient::get_exchange_rates_range(&pair, start, end, interval).await
 }
 
@@ -220,7 +241,7 @@ pub use market::{get_market_status, is_market_open, is_weekend, MarketStatus};
 /// - Low-level parsing utilities
 ///
 /// # Example
-/// ```
+/// ```no_run
 /// use dukascopy_fx::advanced::{DukascopyClientBuilder, InstrumentConfig};
 ///
 /// let client = DukascopyClientBuilder::new()
@@ -234,6 +255,7 @@ pub mod advanced {
     pub use crate::core::client::{
         ClientConfig, ConfiguredClient, ConversionMode, ConversionPathType, DukascopyClient,
         DukascopyClientBuilder, PairResolutionMode, ResolvedExchange, DEFAULT_CACHE_SIZE,
+        DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS, DEFAULT_MAX_DOWNLOAD_CONCURRENCY,
         DEFAULT_MAX_IDLE_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT_REQUESTS, DEFAULT_MAX_RETRIES,
         DEFAULT_RETRY_BASE_DELAY_MS, DEFAULT_TIMEOUT_SECS, DUKASCOPY_BASE_URL,
         GLOBAL_DEFAULT_QUOTE_CURRENCY,
@@ -245,9 +267,11 @@ pub mod advanced {
     };
     pub use crate::core::parser::{DukascopyParser, ParsedTick, TICK_SIZE_BYTES};
     pub use crate::market::last_available_tick_time;
-    pub use crate::models::RateRequest;
+    pub use crate::models::{RateRequest, RequestParseMode};
     pub use crate::storage::checkpoint::{CheckpointStore, FileCheckpointStore};
-    pub use crate::storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
+    #[cfg(feature = "sinks-parquet")]
+    pub use crate::storage::sink::ParquetSink;
+    pub use crate::storage::sink::{CsvSink, DataSink, NoopSink};
 }
 
 // ============================================================================
@@ -260,20 +284,29 @@ pub mod advanced {
 /// use dukascopy_fx::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::api::{download, download_incremental, download_range, Ticker};
+    pub use crate::api::{
+        download, download_incremental, download_incremental_with_client,
+        download_incremental_with_concurrency, download_range, download_range_with_client,
+        download_range_with_concurrency, download_with_client, download_with_concurrency, Period,
+        Ticker, DEFAULT_DOWNLOAD_CONCURRENCY,
+    };
     pub use crate::core::catalog::{AssetClass, InstrumentCatalog, InstrumentDefinition};
     pub use crate::error::DukascopyError;
     pub use crate::market::{is_market_open, is_weekend, MarketStatus};
-    pub use crate::models::{CurrencyExchange, CurrencyPair, RateRequest};
+    pub use crate::models::{CurrencyExchange, CurrencyPair, RateRequest, RequestParseMode};
     pub use crate::storage::checkpoint::{CheckpointStore, FileCheckpointStore};
-    pub use crate::storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
+    #[cfg(feature = "sinks-parquet")]
+    pub use crate::storage::sink::ParquetSink;
+    pub use crate::storage::sink::{CsvSink, DataSink, NoopSink};
     pub use crate::time::{
-        date, datetime, days_ago, hours_ago, now, weeks_ago, DateTime, Duration, Utc,
+        date, datetime, days_ago, hours_ago, now, try_datetime_utc, weeks_ago, DateTime, Duration,
+        Utc,
     };
-    pub use crate::{datetime, ticker};
+    pub use crate::{datetime, ticker, try_datetime, try_ticker};
     pub use crate::{
-        get_rate, get_rate_for_input, get_rate_for_pair, get_rate_for_request, get_rate_for_symbol,
-        get_rate_in_quote, get_rates_range, get_rates_range_for_pair,
+        get_rate, get_rate_for_input, get_rate_for_input_with_mode, get_rate_for_pair,
+        get_rate_for_request, get_rate_for_symbol, get_rate_in_quote, get_rates_range,
+        get_rates_range_for_pair,
     };
     pub use crate::{Error, Result};
 }

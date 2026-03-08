@@ -4,12 +4,34 @@ use std::io;
 use thiserror::Error;
 use tokio::task::JoinError;
 
+/// Transport-layer error category for machine-actionable handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportErrorKind {
+    /// Request timed out.
+    Timeout,
+    /// Connection establishment failed.
+    Connect,
+    /// Non-success HTTP status code not covered by dedicated variants.
+    HttpStatus,
+    /// Failed reading HTTP response body.
+    ResponseBody,
+    /// Other transport-level request/response failure.
+    Other,
+}
+
 /// Errors that can occur when using the Dukascopy FX library.
 #[derive(Error, Debug)]
 pub enum DukascopyError {
-    /// HTTP request failed
-    #[error("HTTP error: {0}")]
-    HttpError(String),
+    /// Structured transport/network error.
+    #[error("Transport error ({kind:?}, status={status:?}): {message}")]
+    Transport {
+        /// Transport error category.
+        kind: TransportErrorKind,
+        /// Optional HTTP status code for status-based failures.
+        status: Option<u16>,
+        /// Human-readable transport error details.
+        message: String,
+    },
 
     /// LZMA decompression failed
     #[error("LZMA decompression error: {0}")]
@@ -27,10 +49,6 @@ pub enum DukascopyError {
         /// Reason why it's invalid
         reason: String,
     },
-
-    /// Attempted to access market during closed hours
-    #[error("Market is closed: {0}")]
-    MarketClosed(String),
 
     /// No data available for the requested time/pair
     #[error("Data not found for {pair} at {timestamp}")]
@@ -94,10 +112,17 @@ impl DukascopyError {
     /// - Timeouts
     /// - Some HTTP errors
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::RateLimitExceeded | Self::Timeout(_) | Self::HttpError(_)
-        )
+        match self {
+            Self::RateLimitExceeded | Self::Timeout(_) => true,
+            Self::Transport { kind, status, .. } => match kind {
+                TransportErrorKind::Timeout | TransportErrorKind::Connect => true,
+                TransportErrorKind::HttpStatus => status
+                    .map(|code| code == 429 || (500..=599).contains(&code))
+                    .unwrap_or(false),
+                TransportErrorKind::ResponseBody | TransportErrorKind::Other => true,
+            },
+            _ => false,
+        }
     }
 
     /// Returns true if this error indicates the data doesn't exist.
@@ -129,9 +154,17 @@ impl From<reqwest::Error> for DukascopyError {
         if err.is_timeout() {
             DukascopyError::Timeout(30)
         } else if err.is_connect() {
-            DukascopyError::HttpError(format!("Connection failed: {}", err))
+            DukascopyError::Transport {
+                kind: TransportErrorKind::Connect,
+                status: None,
+                message: err.to_string(),
+            }
         } else {
-            DukascopyError::HttpError(err.to_string())
+            DukascopyError::Transport {
+                kind: TransportErrorKind::Other,
+                status: err.status().map(|status| status.as_u16()),
+                message: err.to_string(),
+            }
         }
     }
 }
@@ -170,7 +203,24 @@ mod tests {
     fn test_is_retryable() {
         assert!(DukascopyError::RateLimitExceeded.is_retryable());
         assert!(DukascopyError::Timeout(30).is_retryable());
-        assert!(DukascopyError::HttpError("test".into()).is_retryable());
+        assert!(DukascopyError::Transport {
+            kind: TransportErrorKind::Connect,
+            status: None,
+            message: "connect".into()
+        }
+        .is_retryable());
+        assert!(DukascopyError::Transport {
+            kind: TransportErrorKind::HttpStatus,
+            status: Some(503),
+            message: "service unavailable".into()
+        }
+        .is_retryable());
+        assert!(!DukascopyError::Transport {
+            kind: TransportErrorKind::HttpStatus,
+            status: Some(404),
+            message: "not found".into()
+        }
+        .is_retryable());
 
         assert!(!DukascopyError::InvalidTickData.is_retryable());
         assert!(!DukascopyError::DataNotFound.is_retryable());

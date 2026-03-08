@@ -1,14 +1,118 @@
 //! yfinance-style Ticker API for forex data.
 
-use crate::core::client::{ConfiguredClient, DukascopyClient};
+use crate::core::client::{ConfiguredClient, DukascopyClient, DEFAULT_MAX_DOWNLOAD_CONCURRENCY};
 use crate::error::DukascopyError;
 use crate::market::last_available_tick_time;
 use crate::models::{CurrencyExchange, CurrencyPair};
 use crate::storage::checkpoint::CheckpointStore;
 use chrono::{DateTime, Duration, Utc};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use std::str::FromStr;
 
-/// A forex ticker for fetching exchange rate data.
+/// Default maximum number of concurrent ticker download tasks.
+pub const DEFAULT_DOWNLOAD_CONCURRENCY: usize = DEFAULT_MAX_DOWNLOAD_CONCURRENCY;
+
+/// Typed period for historical queries.
+///
+/// Prefer this over raw strings when you want compile-time discoverability.
+///
+/// # Example
+///
+/// ```no_run
+/// use dukascopy_fx::{Period, Ticker};
+///
+/// # async fn example() -> dukascopy_fx::Result<()> {
+/// let ticker = Ticker::try_new("EUR", "USD")?;
+/// let rows = ticker.history_period(Period::Weeks(2)).await?;
+/// println!("rows={}", rows.len());
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Period {
+    /// N calendar days.
+    Days(i64),
+    /// N weeks (7-day buckets).
+    Weeks(i64),
+    /// N months as 30-day blocks.
+    Months(i64),
+    /// N years as 365-day blocks.
+    Years(i64),
+}
+
+impl Period {
+    /// Converts typed period into internal `chrono::Duration`.
+    ///
+    /// Returns validation error for non-positive values.
+    pub fn to_duration(self) -> Result<Duration, DukascopyError> {
+        let (value, unit) = match self {
+            Self::Days(value) => (value, "d"),
+            Self::Weeks(value) => (value, "w"),
+            Self::Months(value) => (value, "mo"),
+            Self::Years(value) => (value, "y"),
+        };
+
+        if value <= 0 {
+            return Err(DukascopyError::InvalidRequest(
+                "Period must be positive".to_string(),
+            ));
+        }
+
+        Ok(match unit {
+            "d" => Duration::days(value),
+            "w" => Duration::weeks(value),
+            "mo" => Duration::days(value * 30),
+            "y" => Duration::days(value * 365),
+            _ => unreachable!("validated period unit"),
+        })
+    }
+}
+
+impl FromStr for Period {
+    type Err = DukascopyError;
+
+    fn from_str(period: &str) -> Result<Self, Self::Err> {
+        let period = period.trim().to_lowercase();
+
+        let (num_str, unit) = if period.ends_with("mo") {
+            (&period[..period.len() - 2], "mo")
+        } else if period.ends_with('d') {
+            (&period[..period.len() - 1], "d")
+        } else if period.ends_with('w') {
+            (&period[..period.len() - 1], "w")
+        } else if period.ends_with('y') {
+            (&period[..period.len() - 1], "y")
+        } else {
+            return Err(DukascopyError::InvalidRequest(format!(
+                "Invalid period format: '{}'. Use '1d', '1w', '1mo', '1y'",
+                period
+            )));
+        };
+
+        let num: i64 = num_str.parse().map_err(|_| {
+            DukascopyError::InvalidRequest(format!("Invalid period number in '{}'", period))
+        })?;
+
+        if num <= 0 {
+            return Err(DukascopyError::InvalidRequest(
+                "Period must be positive".to_string(),
+            ));
+        }
+
+        match unit {
+            "d" => Ok(Self::Days(num)),
+            "w" => Ok(Self::Weeks(num)),
+            "mo" => Ok(Self::Months(num)),
+            "y" => Ok(Self::Years(num)),
+            _ => unreachable!("validated period unit"),
+        }
+    }
+}
+
+/// A ticker handle for fetching instrument rate data.
+///
+/// `Ticker` is intentionally cheap to clone and keeps only pair + interval
+/// configuration. Network state lives in the underlying client.
 ///
 /// # Example
 ///
@@ -16,7 +120,7 @@ use std::str::FromStr;
 /// use dukascopy_fx::Ticker;
 ///
 /// # async fn example() -> dukascopy_fx::Result<()> {
-/// let ticker = Ticker::new("EUR", "USD");
+/// let ticker = Ticker::try_new("EUR", "USD")?;
 ///
 /// // Get recent rate
 /// let rate = ticker.rate().await?;
@@ -34,7 +138,18 @@ pub struct Ticker {
 }
 
 impl Ticker {
+    /// Creates a new ticker for a currency pair with validation.
+    pub fn try_new(from: &str, to: &str) -> Result<Self, DukascopyError> {
+        Ok(Self {
+            pair: CurrencyPair::try_new(from, to)?,
+            interval: Duration::hours(1),
+        })
+    }
+
     /// Creates a new ticker for a currency pair.
+    ///
+    /// This constructor does not validate instrument codes.
+    /// Prefer [`Ticker::try_new`] for validated input paths.
     #[inline]
     pub fn new(from: &str, to: &str) -> Self {
         Self {
@@ -52,7 +167,22 @@ impl Ticker {
         })
     }
 
-    /// Sets the data interval for historical queries.
+    /// Sets the sampling interval for history/range queries.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use dukascopy_fx::{Ticker, time::Duration};
+    ///
+    /// # async fn example() -> dukascopy_fx::Result<()> {
+    /// let rows = Ticker::try_new("EUR", "USD")?
+    ///     .interval(Duration::minutes(30))
+    ///     .history("1d")
+    ///     .await?;
+    /// println!("rows={}", rows.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
@@ -115,6 +245,29 @@ impl Ticker {
         self.history_from_end(period, end).await
     }
 
+    /// Fetches historical data using typed period.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use dukascopy_fx::{Period, Ticker};
+    ///
+    /// # async fn example() -> dukascopy_fx::Result<()> {
+    /// let rows = Ticker::try_new("XAU", "USD")?
+    ///     .history_period(Period::Months(1))
+    ///     .await?;
+    /// println!("rows={}", rows.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn history_period(
+        &self,
+        period: Period,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let end = Utc::now() - Duration::hours(1);
+        self.history_period_from_end(period, end).await
+    }
+
     /// Fetches historical data for a time period using a configured client.
     pub async fn history_with_client(
         &self,
@@ -131,8 +284,17 @@ impl Ticker {
         period: &str,
         end: DateTime<Utc>,
     ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
-        let duration = parse_period(period)?;
-        let start = end - duration;
+        let start = end - parse_period(period)?;
+        self.history_range(start, end).await
+    }
+
+    /// Fetches historical data for a typed period ending at a specific timestamp.
+    pub async fn history_period_from_end(
+        &self,
+        period: Period,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let start = end - period.to_duration()?;
         self.history_range(start, end).await
     }
 
@@ -143,8 +305,20 @@ impl Ticker {
         period: &str,
         end: DateTime<Utc>,
     ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
-        let duration = parse_period(period)?;
-        let start = end - duration;
+        let start = end - parse_period(period)?;
+        client
+            .get_exchange_rates_range(&self.pair, start, end, self.interval)
+            .await
+    }
+
+    /// Fetches historical data for a typed period ending at a specific timestamp using a configured client.
+    pub async fn history_period_from_end_with_client(
+        &self,
+        client: &ConfiguredClient,
+        period: Period,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<CurrencyExchange>, DukascopyError> {
+        let start = end - period.to_duration()?;
         client
             .get_exchange_rates_range(&self.pair, start, end, self.interval)
             .await
@@ -324,47 +498,7 @@ impl FromStr for Ticker {
 // ============================================================================
 
 fn parse_period(period: &str) -> Result<Duration, DukascopyError> {
-    let period = period.trim().to_lowercase();
-
-    let (num_str, unit) = if period.ends_with("mo") {
-        (&period[..period.len() - 2], "mo")
-    } else if period.ends_with('d') {
-        (&period[..period.len() - 1], "d")
-    } else if period.ends_with('w') {
-        (&period[..period.len() - 1], "w")
-    } else if period.ends_with('y') {
-        (&period[..period.len() - 1], "y")
-    } else {
-        return Err(DukascopyError::InvalidRequest(format!(
-            "Invalid period format: '{}'. Use '1d', '1w', '1mo', '1y'",
-            period
-        )));
-    };
-
-    let num: i64 = num_str.parse().map_err(|_| {
-        DukascopyError::InvalidRequest(format!("Invalid period number in '{}'", period))
-    })?;
-
-    if num <= 0 {
-        return Err(DukascopyError::InvalidRequest(
-            "Period must be positive".to_string(),
-        ));
-    }
-
-    let duration = match unit {
-        "d" => Duration::days(num),
-        "w" => Duration::weeks(num),
-        "mo" => Duration::days(num * 30),
-        "y" => Duration::days(num * 365),
-        _ => {
-            return Err(DukascopyError::InvalidRequest(format!(
-                "Invalid period format: '{}'. Use '1d', '1w', '1mo', '1y'",
-                period
-            )))
-        }
-    };
-
-    Ok(duration)
+    Period::from_str(period)?.to_duration()
 }
 
 // ============================================================================
@@ -376,12 +510,72 @@ pub async fn download(
     tickers: &[Ticker],
     period: &str,
 ) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
-    let mut results = Vec::with_capacity(tickers.len());
-    for ticker in tickers {
-        let history = ticker.history(period).await?;
-        results.push((ticker.clone(), history));
+    download_with_concurrency(tickers, period, DEFAULT_DOWNLOAD_CONCURRENCY).await
+}
+
+/// Downloads historical data for multiple tickers with custom concurrency limit.
+pub async fn download_with_concurrency(
+    tickers: &[Ticker],
+    period: &str,
+    max_concurrency: usize,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    if tickers.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(results)
+
+    let concurrency = resolve_download_concurrency(tickers.len(), max_concurrency)?;
+    let period = period.to_string();
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> =
+        stream::iter(tickers.iter().cloned().enumerate().map(|(index, ticker)| {
+            let period = period.clone();
+            async move {
+                let history = ticker.history(&period).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }
+        }))
+        .buffer_unordered(concurrency)
+        .try_collect()
+        .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
+}
+
+/// Downloads historical data using client-configured concurrency.
+pub async fn download_with_client(
+    client: &ConfiguredClient,
+    tickers: &[Ticker],
+    period: &str,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    if tickers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let concurrency = resolve_download_concurrency(
+        tickers.len(),
+        client.config().max_download_concurrency.max(1),
+    )?;
+    let period = period.to_string();
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> =
+        stream::iter(tickers.iter().cloned().enumerate().map(|(index, ticker)| {
+            let period = period.clone();
+            async move {
+                let history = ticker.history_with_client(client, &period).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }
+        }))
+        .buffer_unordered(concurrency)
+        .try_collect()
+        .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
 }
 
 /// Downloads historical data with custom date range.
@@ -390,12 +584,76 @@ pub async fn download_range(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
-    let mut results = Vec::with_capacity(tickers.len());
-    for ticker in tickers {
-        let history = ticker.history_range(start, end).await?;
-        results.push((ticker.clone(), history));
+    download_range_with_concurrency(tickers, start, end, DEFAULT_DOWNLOAD_CONCURRENCY).await
+}
+
+/// Downloads historical data with custom date range and concurrency limit.
+pub async fn download_range_with_concurrency(
+    tickers: &[Ticker],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    max_concurrency: usize,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    if tickers.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(results)
+
+    let concurrency = resolve_download_concurrency(tickers.len(), max_concurrency)?;
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
+        tickers
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, ticker)| async move {
+                let history = ticker.history_range(start, end).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }),
+    )
+    .buffer_unordered(concurrency)
+    .try_collect()
+    .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
+}
+
+/// Downloads historical data over a custom range using client-configured concurrency.
+pub async fn download_range_with_client(
+    client: &ConfiguredClient,
+    tickers: &[Ticker],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    if tickers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let concurrency = resolve_download_concurrency(
+        tickers.len(),
+        client.config().max_download_concurrency.max(1),
+    )?;
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
+        tickers
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, ticker)| async move {
+                let history = ticker.history_range_with_client(client, start, end).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }),
+    )
+    .buffer_unordered(concurrency)
+    .try_collect()
+    .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
 }
 
 /// Incrementally downloads data for multiple tickers using checkpoint store.
@@ -404,18 +662,98 @@ pub async fn download_incremental<S: CheckpointStore>(
     store: &S,
     lookback: Duration,
 ) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
-    let mut results = Vec::with_capacity(tickers.len());
-    for ticker in tickers {
-        let history = ticker.fetch_incremental(store, lookback).await?;
-        results.push((ticker.clone(), history));
+    download_incremental_with_concurrency(tickers, store, lookback, DEFAULT_DOWNLOAD_CONCURRENCY)
+        .await
+}
+
+/// Incrementally downloads data for multiple tickers with custom concurrency limit.
+pub async fn download_incremental_with_concurrency<S: CheckpointStore>(
+    tickers: &[Ticker],
+    store: &S,
+    lookback: Duration,
+    max_concurrency: usize,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    if tickers.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(results)
+
+    let concurrency = resolve_download_concurrency(tickers.len(), max_concurrency)?;
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
+        tickers
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, ticker)| async move {
+                let history = ticker.fetch_incremental(store, lookback).await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }),
+    )
+    .buffer_unordered(concurrency)
+    .try_collect()
+    .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
+}
+
+/// Incrementally downloads data using client-configured concurrency.
+pub async fn download_incremental_with_client<S: CheckpointStore>(
+    client: &ConfiguredClient,
+    tickers: &[Ticker],
+    store: &S,
+    lookback: Duration,
+) -> Result<Vec<(Ticker, Vec<CurrencyExchange>)>, DukascopyError> {
+    if tickers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let concurrency = resolve_download_concurrency(
+        tickers.len(),
+        client.config().max_download_concurrency.max(1),
+    )?;
+    let mut indexed_results: Vec<(usize, Ticker, Vec<CurrencyExchange>)> = stream::iter(
+        tickers
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, ticker)| async move {
+                let history = ticker
+                    .fetch_incremental_with_client(client, store, lookback)
+                    .await?;
+                Ok::<_, DukascopyError>((index, ticker, history))
+            }),
+    )
+    .buffer_unordered(concurrency)
+    .try_collect()
+    .await?;
+
+    indexed_results.sort_by_key(|(index, _, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, ticker, history)| (ticker, history))
+        .collect())
 }
 
 fn deduplicate_by_timestamp(mut history: Vec<CurrencyExchange>) -> Vec<CurrencyExchange> {
     history.sort_by_key(|rate| rate.timestamp);
     history.dedup_by_key(|rate| rate.timestamp);
     history
+}
+
+fn resolve_download_concurrency(
+    num_tickers: usize,
+    max_concurrency: usize,
+) -> Result<usize, DukascopyError> {
+    if max_concurrency == 0 {
+        return Err(DukascopyError::InvalidRequest(
+            "Download concurrency must be at least 1".to_string(),
+        ));
+    }
+
+    Ok(num_tickers.clamp(1, max_concurrency))
 }
 
 // ============================================================================
@@ -514,9 +852,38 @@ mod tests {
     }
 
     #[test]
+    fn test_period_from_str() {
+        assert_eq!(Period::from_str("1d").unwrap(), Period::Days(1));
+        assert_eq!(Period::from_str("2w").unwrap(), Period::Weeks(2));
+        assert_eq!(Period::from_str("3mo").unwrap(), Period::Months(3));
+        assert_eq!(Period::from_str("1y").unwrap(), Period::Years(1));
+    }
+
+    #[test]
+    fn test_period_from_str_invalid() {
+        assert!(Period::from_str("bad").is_err());
+        assert!(Period::from_str("0d").is_err());
+        assert!(Period::from_str("-1d").is_err());
+        assert!(Period::Days(0).to_duration().is_err());
+        assert!(Period::Weeks(-1).to_duration().is_err());
+    }
+
+    #[test]
     fn test_ticker_interval() {
         let ticker = Ticker::new("EUR", "USD").interval(Duration::minutes(30));
         assert_eq!(ticker.interval, Duration::minutes(30));
+    }
+
+    #[test]
+    fn test_ticker_try_new_validates_input() {
+        let ticker = Ticker::try_new("eur", "usd").unwrap();
+        assert_eq!(ticker.symbol(), "EURUSD");
+
+        let err = Ticker::try_new("BAD$", "USD").unwrap_err();
+        assert!(matches!(
+            err,
+            DukascopyError::InvalidCurrencyCode { code, .. } if code == "BAD$"
+        ));
     }
 
     #[test]
@@ -643,5 +1010,95 @@ mod tests {
         let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
         let result = ticker.history_from_end("bad", end).await;
         assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_history_period_from_end_rejects_non_positive_period_without_network_call() {
+        let ticker = Ticker::new("EUR", "USD");
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 10, 0, 0).unwrap();
+        let result = ticker.history_period_from_end(Period::Days(0), end).await;
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_download_empty_returns_empty_without_network_call() {
+        let result = download(&[], "1d").await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_range_empty_returns_empty_without_network_call() {
+        let start = Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 1, 0, 0).unwrap();
+        let result = download_range(&[], start, end).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_incremental_empty_returns_empty_without_network_call() {
+        let store = InMemoryCheckpointStore::default();
+        let result = download_incremental(&[], &store, Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_with_concurrency_rejects_zero_limit() {
+        let ticker = Ticker::new("EUR", "USD");
+        let result = download_with_concurrency(&[ticker], "1d", 0).await;
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_download_range_with_concurrency_rejects_zero_limit() {
+        let ticker = Ticker::new("EUR", "USD");
+        let start = Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 1, 0, 0).unwrap();
+        let result = download_range_with_concurrency(&[ticker], start, end, 0).await;
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_download_incremental_with_concurrency_rejects_zero_limit() {
+        let store = InMemoryCheckpointStore::default();
+        let ticker = Ticker::new("EUR", "USD");
+        let result =
+            download_incremental_with_concurrency(&[ticker], &store, Duration::hours(1), 0).await;
+        assert!(matches!(result, Err(DukascopyError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_download_with_client_empty_returns_empty_without_network_call() {
+        let client = crate::advanced::DukascopyClientBuilder::new()
+            .max_download_concurrency(2)
+            .build();
+        let result = download_with_client(&client, &[], "1d").await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_range_with_client_empty_returns_empty_without_network_call() {
+        let client = crate::advanced::DukascopyClientBuilder::new()
+            .max_download_concurrency(2)
+            .build();
+        let start = Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 10, 1, 0, 0).unwrap();
+        let result = download_range_with_client(&client, &[], start, end)
+            .await
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_incremental_with_client_empty_returns_empty_without_network_call() {
+        let client = crate::advanced::DukascopyClientBuilder::new()
+            .max_download_concurrency(2)
+            .build();
+        let store = InMemoryCheckpointStore::default();
+        let result = download_incremental_with_client(&client, &[], &store, Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(result.is_empty());
     }
 }

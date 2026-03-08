@@ -7,9 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Changelog is the canonical release source; removed separate `RELEASE_NOTES.md` to avoid duplication.
+
+### Changed
+
+- MSRV raised from `1.76` to `1.83` (transitive dependency toolchain requirement).
+- CI hardened with least-privilege token permissions, workflow concurrency cancellation, job timeouts, lockfile-enforced Cargo commands, and faster supply-chain tool install via `taiki-e/install-action@v2`.
+- `cargo-deny` advisory exception added for `RUSTSEC-2025-0134` (`rustls-pemfile`) because it is transitive via `reqwest` and currently has no safe upgrade path.
+- `cargo-deny` advisory exception added for `RUSTSEC-2024-0436` (`paste`) because it is transitive via `parquet` and currently has no maintained replacement in this dependency chain.
+
+## [0.5.0] - 2026-03-07
+
 ### Added
 
-_No changes yet._
+- API: explicit request parsing controls via `RequestParseMode`, `RateRequest::parse_with_mode(...)`, and `get_rate_for_input_with_mode(...)`.
+- API: typed ticker periods via `Period`, `history_period(...)`, and `history_period_from_end(...)`.
+- API: concurrency-aware batch helpers (`download_with_concurrency(...)`, `download_range_with_concurrency(...)`, `download_incremental_with_concurrency(...)`).
+- API: client-scoped batch helpers (`download_with_client(...)`, `download_range_with_client(...)`, `download_incremental_with_client(...)`).
+- API: client policy controls (`max_at_or_before_backtrack_hours(...)`, `DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS`, `DEFAULT_DOWNLOAD_CONCURRENCY`).
+- API: non-panicking convenience helpers (`try_datetime!(...)`, `try_ticker!(...)`, `time::try_datetime_utc(...)`).
+- Interop: dataframe adapter API (`FlatExchangeRow`, `flatten_row(...)`, `flatten_rows(...)`).
+- CLI: global options `--config PATH.toml` and `--json`.
+- Quality: public API snapshot test (`tests/public_api_snapshot_test.rs`).
+- Perf: benchmark harness (`benches/core_benchmarks.rs`).
+- CI: matrix jobs for `stable`, `beta`, and `MSRV`.
+
+### Changed
+
+- Cache payloads are shared (`Arc<[u8]>`) to reduce clone pressure on hot paths.
+- Range fallback now reuses previously resolved values and per-hour fallback lookups.
+- Batch download APIs run with bounded concurrency while preserving input order.
+- Unified request parsing recognizes six-letter FX shorthand (for example `EURUSD`) as explicit pair requests.
+- Public helper functions validate pair codes eagerly via `CurrencyPair::try_new`.
+- Default dependency surface reduced (replaced `tokio/full` with explicit Tokio runtime features).
+- `arrow`/`parquet` moved behind optional `sinks-parquet`.
+- `fx_fetcher` now builds without `sinks-parquet`; parquet paths return clear feature-gating errors.
+- `fx_fetcher` now enforces strict flag validation and explicit output mode (`--out` or `--no-output`).
+- `fx_fetcher` concurrency now configures both worker fan-out and client in-flight limits.
+- `fx_fetcher` duration parser accepts `mo` and `y`.
+- `fx_fetcher` sitemap/category discovery now uses parser-based XML/HTML extraction.
+- HTTP client setup now uses no-proxy builder path for headless/runtime portability.
+- Live integration suite is now opt-in (`LIVE_TESTS=1`) to reduce default CI/local flakiness.
+
+### Fixed
+
+- `cargo check --no-default-features` compatibility.
+- Tick lookup now enforces strict at-or-before semantics (no look-ahead), with bounded backward fallback.
+- Range/history fallback behavior for sparse data windows.
+- Storage sinks now return explicit conversion errors instead of silent `0.0` values.
+- Checkpoint file replacement hardened for filesystems where rename-over-existing may fail.
+- `DukascopyError::Transport { kind, status, message }` now carries structured transport failures.
+- `DataNotFoundFor` is emitted by at-or-before exhaustion paths.
+- `fx_fetcher` data-loss trap fixed: no checkpoint advance in `--no-output` mode.
+- `fx_fetcher export` now supports `--has-headers` and validates pair codes.
+
+### Documentation
+
+- README redesigned for adoption with 30-second quickstart, copy-paste workflows, feature matrix, and FAQ.
+- API rustdocs expanded for `Ticker`, `Period`, and `ClientConfig`.
+- Added docs: `docs/API_STABILITY.md`, `docs/CLI_CONFIG.md`, `docs/BENCHMARKS.md`, `docs/INTEGRATIONS.md`, and `ROADMAP.md`.
+
+### Removed
+
+- Removed unused `DukascopyError::MarketClosed` variant.
 
 ## [0.4.0] - 2026-02-23
 

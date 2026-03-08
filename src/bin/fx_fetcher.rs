@@ -3,16 +3,24 @@ use dukascopy_fx::advanced::{
     last_available_tick_time, resolve_instrument_config, ConfiguredClient, DukascopyClientBuilder,
 };
 use dukascopy_fx::storage::checkpoint::CheckpointStore;
-use dukascopy_fx::storage::sink::{CsvSink, DataSink, NoopSink, ParquetSink};
+#[cfg(feature = "sinks-parquet")]
+use dukascopy_fx::storage::sink::ParquetSink;
+use dukascopy_fx::storage::sink::{CsvSink, DataSink, NoopSink};
+#[cfg(feature = "sinks-parquet")]
+use dukascopy_fx::CurrencyPair;
 use dukascopy_fx::{
-    AssetClass, CurrencyExchange, CurrencyPair, DukascopyError, FileCheckpointStore,
-    InstrumentCatalog, InstrumentDefinition, Ticker,
+    AssetClass, CurrencyExchange, DukascopyError, FileCheckpointStore, InstrumentCatalog,
+    InstrumentDefinition, Ticker,
 };
+use quick_xml::events::Event;
+#[cfg(feature = "sinks-parquet")]
 use rust_decimal::Decimal;
-use serde::Serialize;
+use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
+#[cfg(feature = "sinks-parquet")]
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -22,6 +30,68 @@ const DEFAULT_CHECKPOINT_PATH: &str = ".state/checkpoints.json";
 const DEFAULT_CONCURRENCY: usize = 8;
 const DEFAULT_DISCOVERY_SOURCE: &str = "https://www.dukascopy-node.app";
 const CATEGORY_FETCH_CONCURRENCY: usize = 8;
+
+#[derive(Debug, Default, Deserialize)]
+struct CliConfig {
+    global: Option<GlobalConfig>,
+    backfill: Option<BackfillConfig>,
+    update: Option<UpdateConfig>,
+    sync_universe: Option<SyncUniverseConfig>,
+    export: Option<ExportConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GlobalConfig {
+    universe: Option<String>,
+    checkpoint: Option<String>,
+    concurrency: Option<usize>,
+    json: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BackfillConfig {
+    symbols: Option<Vec<String>>,
+    period: Option<String>,
+    interval: Option<String>,
+    out: Option<String>,
+    no_output: Option<bool>,
+    concurrency: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UpdateConfig {
+    symbols: Option<Vec<String>>,
+    lookback: Option<String>,
+    interval: Option<String>,
+    out: Option<String>,
+    no_output: Option<bool>,
+    concurrency: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SyncUniverseConfig {
+    source: Option<String>,
+    dry_run: Option<bool>,
+    activate_new: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ExportConfig {
+    input: Option<String>,
+    out: Option<String>,
+    has_headers: Option<bool>,
+}
+
+#[derive(Debug, Default)]
+struct GlobalCliOptions {
+    config_path: Option<String>,
+    json: bool,
+}
+
+struct AppContext {
+    json: bool,
+    config: CliConfig,
+}
 
 struct BackfillFetchResult {
     ticker: Ticker,
@@ -42,33 +112,92 @@ struct UpdateFetchResult {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().skip(1).collect();
+async fn main() {
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+    let (args, global_opts) = match extract_global_options(&raw_args) {
+        Ok(values) => values,
+        Err(err) => {
+            let message = err.to_string();
+            let code = classify_exit_code(&message);
+            emit_cli_error(raw_args.iter().any(|arg| arg == "--json"), code, &message);
+            std::process::exit(code);
+        }
+    };
+
+    let config = match global_opts.config_path.as_deref() {
+        Some(path) => match load_cli_config(path) {
+            Ok(config) => config,
+            Err(err) => {
+                let message = err.to_string();
+                let code = classify_exit_code(&message);
+                emit_cli_error(global_opts.json, code, &message);
+                std::process::exit(code);
+            }
+        },
+        None => CliConfig::default(),
+    };
+
+    let json = global_opts.json
+        || config
+            .global
+            .as_ref()
+            .and_then(|cfg| cfg.json)
+            .unwrap_or(false);
+    let ctx = AppContext { json, config };
+
+    let result = run_command(&args, &ctx).await;
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(err) => {
+            let message = err.to_string();
+            let code = classify_exit_code(&message);
+            emit_cli_error(ctx.json, code, &message);
+            std::process::exit(code);
+        }
+    }
+}
+
+async fn run_command(args: &[String], ctx: &AppContext) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
         print_usage();
-        return Ok(());
+        return Err("Missing command. See usage above.".into());
     }
 
     match args[0].as_str() {
+        "--help" | "-h" => {
+            print_usage();
+        }
         "list-instruments" => {
+            if has_flag(&args[1..], "--help") {
+                println!("fx_fetcher list-instruments [--universe PATH]");
+                return Ok(());
+            }
+            validate_flags(&args[1..], &["--universe"], &[])?;
             let universe_path = read_flag_value(&args[1..], "--universe")
+                .or_else(|| {
+                    ctx.config
+                        .global
+                        .as_ref()
+                        .and_then(|cfg| cfg.universe.clone())
+                })
                 .unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
-            list_instruments(&universe_path)?;
+            list_instruments(&universe_path, ctx.json)?;
         }
         "backfill" => {
-            run_backfill(&args[1..]).await?;
+            run_backfill(&args[1..], ctx).await?;
         }
         "update" => {
-            run_update(&args[1..]).await?;
+            run_update(&args[1..], ctx).await?;
         }
         "sync-universe" => {
-            run_sync_universe(&args[1..]).await?;
+            run_sync_universe(&args[1..], ctx).await?;
         }
         "export" => {
-            run_export(&args[1..])?;
+            run_export(&args[1..], ctx)?;
         }
         _ => {
             print_usage();
+            return Err(format!("Unknown command '{}'", args[0]).into());
         }
     }
 
@@ -79,43 +208,118 @@ fn print_usage() {
     println!("fx_fetcher - Dukascopy fetcher CLI");
     println!();
     println!("Usage:");
-    println!("  fx_fetcher list-instruments [--universe PATH]");
+    println!("  fx_fetcher [--config PATH.toml] [--json] list-instruments [--universe PATH]");
     println!(
-        "  fx_fetcher backfill [--universe PATH] [--symbols EURUSD,GBPUSD] [--period 30d] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet)] [--concurrency N]"
+        "  fx_fetcher [--config PATH.toml] [--json] backfill [--universe PATH] [--symbols EURUSD,GBPUSD] [--period 30d] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet) | --no-output] [--concurrency N]"
     );
     println!(
-        "  fx_fetcher update [--universe PATH] [--symbols EURUSD,GBPUSD] [--lookback 7d] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet)] [--concurrency N]"
+        "  fx_fetcher [--config PATH.toml] [--json] update [--universe PATH] [--symbols EURUSD,GBPUSD] [--lookback 7d] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet) | --no-output] [--concurrency N]"
     );
     println!(
-        "  fx_fetcher sync-universe [--universe PATH] [--source URL] [--dry-run] [--activate-new]"
+        "  fx_fetcher [--config PATH.toml] [--json] sync-universe [--universe PATH] [--source URL] [--dry-run] [--activate-new]"
     );
-    println!("  fx_fetcher export --input PATH.csv --out PATH.parquet");
+    println!(
+        "  fx_fetcher [--config PATH.toml] [--json] export --input PATH.csv --out PATH.parquet [--has-headers]"
+    );
+    println!();
+    println!("Global flags:");
+    println!("  --config PATH.toml   Load defaults from TOML config file");
+    println!("  --json               Emit machine-readable JSON summaries/errors");
+    #[cfg(not(feature = "sinks-parquet"))]
+    println!("  note: parquet export/output needs --features sinks-parquet");
 }
 
-fn list_instruments(universe_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn print_backfill_usage() {
+    println!(
+        "fx_fetcher backfill [--universe PATH] [--symbols EURUSD,GBPUSD] [--period 30d|1mo|1y] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet) | --no-output] [--concurrency N]"
+    );
+}
+
+fn print_update_usage() {
+    println!(
+        "fx_fetcher update [--universe PATH] [--symbols EURUSD,GBPUSD] [--lookback 7d|1mo|1y] [--interval 1h] [--checkpoint PATH] [--out PATH.(csv|parquet) | --no-output] [--concurrency N]"
+    );
+}
+
+fn print_sync_universe_usage() {
+    println!(
+        "fx_fetcher sync-universe [--universe PATH] [--source URL] [--dry-run] [--activate-new]"
+    );
+}
+
+fn print_export_usage() {
+    println!("fx_fetcher export --input PATH.csv --out PATH.parquet [--has-headers]");
+}
+
+fn validate_flags(
+    args: &[String],
+    flags_with_values: &[&str],
+    flags_without_values: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut i = 0usize;
+    while i < args.len() {
+        let current = &args[i];
+        if !current.starts_with("--") {
+            return Err(format!("Unexpected positional argument '{}'", current).into());
+        }
+
+        if flags_with_values.contains(&current.as_str()) {
+            let Some(value) = args.get(i + 1) else {
+                return Err(format!("Missing value for option '{}'", current).into());
+            };
+            if value.starts_with("--") {
+                return Err(format!("Missing value for option '{}'", current).into());
+            }
+            i += 2;
+            continue;
+        }
+
+        if flags_without_values.contains(&current.as_str()) {
+            i += 1;
+            continue;
+        }
+
+        return Err(format!("Unknown option '{}'", current).into());
+    }
+
+    Ok(())
+}
+
+fn list_instruments(universe_path: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let catalog = InstrumentCatalog::from_file(universe_path)?;
     let instruments = catalog.active_instruments();
 
-    println!(
-        "Loaded {} active instruments from {}",
-        instruments.len(),
-        universe_path
-    );
-    println!(
-        "{:<10} {:<8} {:<8} {:<10} {:<8} {:<10}",
-        "Symbol", "Base", "Quote", "Class", "Decimals", "Divisor"
-    );
-    println!("{}", "-".repeat(64));
-    for instrument in instruments {
+    if json {
+        let payload = serde_json::json!({
+            "ok": true,
+            "command": "list-instruments",
+            "universe": universe_path,
+            "count": instruments.len(),
+            "symbols": instruments.iter().map(|it| it.symbol.as_str()).collect::<Vec<_>>(),
+        });
+        println!("{}", payload);
+    } else {
         println!(
-            "{:<10} {:<8} {:<8} {:<10} {:<8} {:<10.0}",
-            instrument.symbol,
-            instrument.base,
-            instrument.quote,
-            format!("{:?}", instrument.asset_class).to_lowercase(),
-            instrument.decimal_places,
-            instrument.price_divisor
+            "Loaded {} active instruments from {}",
+            instruments.len(),
+            universe_path
         );
+        println!(
+            "{:<10} {:<8} {:<8} {:<10} {:<8} {:<10}",
+            "Symbol", "Base", "Quote", "Class", "Decimals", "Divisor"
+        );
+        println!("{}", "-".repeat(64));
+        for instrument in instruments {
+            println!(
+                "{:<10} {:<8} {:<8} {:<10} {:<8} {:<10.0}",
+                instrument.symbol,
+                instrument.base,
+                instrument.quote,
+                format!("{:?}", instrument.asset_class).to_lowercase(),
+                instrument.decimal_places,
+                instrument.price_divisor
+            );
+        }
     }
 
     Ok(())
@@ -136,36 +340,71 @@ struct PersistedCatalog {
     code_aliases: BTreeMap<String, String>,
 }
 
-async fn run_sync_universe(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let universe_path =
-        read_flag_value(args, "--universe").unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
-    let source =
-        read_flag_value(args, "--source").unwrap_or_else(|| DEFAULT_DISCOVERY_SOURCE.to_string());
-    let dry_run = has_flag(args, "--dry-run");
-    let activate_new = has_flag(args, "--activate-new");
+async fn run_sync_universe(
+    args: &[String],
+    ctx: &AppContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_sync_universe_usage();
+        return Ok(());
+    }
+    validate_flags(
+        args,
+        &["--universe", "--source"],
+        &["--dry-run", "--activate-new"],
+    )?;
+
+    let sync_config = ctx.config.sync_universe.as_ref();
+    let universe_path = read_flag_value(args, "--universe")
+        .or_else(|| {
+            ctx.config
+                .global
+                .as_ref()
+                .and_then(|cfg| cfg.universe.clone())
+        })
+        .unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
+    let source = read_flag_value(args, "--source")
+        .or_else(|| sync_config.and_then(|cfg| cfg.source.clone()))
+        .unwrap_or_else(|| DEFAULT_DISCOVERY_SOURCE.to_string());
+    let dry_run = if has_flag(args, "--dry-run") {
+        true
+    } else {
+        sync_config.and_then(|cfg| cfg.dry_run).unwrap_or(false)
+    };
+    let activate_new = if has_flag(args, "--activate-new") {
+        true
+    } else {
+        sync_config
+            .and_then(|cfg| cfg.activate_new)
+            .unwrap_or(false)
+    };
 
     let existing_catalog = InstrumentCatalog::from_file(&universe_path)?;
-    println!(
-        "Sync started. Source: {}. Existing instruments: {}",
-        source,
-        existing_catalog.instruments.len()
-    );
+    if !ctx.json {
+        println!(
+            "Sync started. Source: {}. Existing instruments: {}",
+            source,
+            existing_catalog.instruments.len()
+        );
+    }
 
     let discovered = discover_instruments_from_source(&source).await?;
     let (merged_catalog, stats, mut new_symbols) =
         merge_catalog_with_discovery(existing_catalog, discovered, activate_new);
 
-    println!(
-        "Sync summary: existing={}, discovered={}, present={}, new={}, reclassified={}",
-        stats.existing_count,
-        stats.discovered_count,
-        stats.present_count,
-        stats.new_count,
-        stats.reclassified_count
-    );
+    if !ctx.json {
+        println!(
+            "Sync summary: existing={}, discovered={}, present={}, new={}, reclassified={}",
+            stats.existing_count,
+            stats.discovered_count,
+            stats.present_count,
+            stats.new_count,
+            stats.reclassified_count
+        );
+    }
 
     new_symbols.sort();
-    if !new_symbols.is_empty() {
+    if !ctx.json && !new_symbols.is_empty() {
         let preview: Vec<String> = new_symbols.iter().take(20).cloned().collect();
         println!(
             "New symbols (first {}): {}",
@@ -175,16 +414,55 @@ async fn run_sync_universe(args: &[String]) -> Result<(), Box<dyn std::error::Er
     }
 
     if dry_run {
-        println!("Dry-run mode: no file changes written to {}", universe_path);
+        if ctx.json {
+            let payload = serde_json::json!({
+                "ok": true,
+                "command": "sync-universe",
+                "dry_run": true,
+                "universe": universe_path,
+                "source": source,
+                "stats": {
+                    "existing": stats.existing_count,
+                    "discovered": stats.discovered_count,
+                    "present": stats.present_count,
+                    "new": stats.new_count,
+                    "reclassified": stats.reclassified_count,
+                },
+                "new_symbols": new_symbols,
+            });
+            println!("{}", payload);
+        } else {
+            println!("Dry-run mode: no file changes written to {}", universe_path);
+        }
         return Ok(());
     }
 
     write_catalog_file(&universe_path, &merged_catalog)?;
-    println!(
-        "Universe updated at {}. Total instruments: {}",
-        universe_path,
-        merged_catalog.instruments.len()
-    );
+    if ctx.json {
+        let payload = serde_json::json!({
+            "ok": true,
+            "command": "sync-universe",
+            "dry_run": false,
+            "universe": universe_path,
+            "source": source,
+            "total_instruments": merged_catalog.instruments.len(),
+            "stats": {
+                "existing": stats.existing_count,
+                "discovered": stats.discovered_count,
+                "present": stats.present_count,
+                "new": stats.new_count,
+                "reclassified": stats.reclassified_count,
+            },
+            "new_symbols": new_symbols,
+        });
+        println!("{}", payload);
+    } else {
+        println!(
+            "Universe updated at {}. Total instruments: {}",
+            universe_path,
+            merged_catalog.instruments.len()
+        );
+    }
 
     Ok(())
 }
@@ -486,64 +764,172 @@ fn is_country_equity_category(category: &str) -> bool {
 }
 
 fn extract_slugs_from_sitemap(xml: &str, marker: &str) -> Vec<String> {
-    let mut cursor = 0usize;
     let mut slugs = BTreeSet::new();
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
 
-    while let Some(loc_start_relative) = xml[cursor..].find("<loc>") {
-        let loc_start = cursor + loc_start_relative + "<loc>".len();
-        let Some(loc_end_relative) = xml[loc_start..].find("</loc>") else {
-            break;
-        };
-        let loc_end = loc_start + loc_end_relative;
-        let loc_value = &xml[loc_start..loc_end];
-
-        if let Some(marker_position) = loc_value.find(marker) {
-            let slug = &loc_value[marker_position + marker.len()..];
-            if !slug.is_empty()
-                && slug
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-            {
-                slugs.insert(slug.to_ascii_lowercase());
+    let mut in_loc = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(tag)) if tag.name().as_ref() == b"loc" => {
+                in_loc = true;
             }
+            Ok(Event::End(tag)) if tag.name().as_ref() == b"loc" => {
+                in_loc = false;
+            }
+            Ok(Event::Text(text)) if in_loc => {
+                let loc_value = String::from_utf8_lossy(text.as_ref()).into_owned();
+                if let Some(marker_position) = loc_value.find(marker) {
+                    let rest = &loc_value[marker_position + marker.len()..];
+                    let slug = rest
+                        .split(['?', '#', '/'])
+                        .next()
+                        .map(str::trim)
+                        .unwrap_or("");
+                    if !slug.is_empty()
+                        && slug
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+                    {
+                        slugs.insert(slug.to_ascii_lowercase());
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
         }
-
-        cursor = loc_end + "</loc>".len();
     }
 
     slugs.into_iter().collect()
 }
 
 fn extract_instrument_slugs_from_html(html: &str) -> Vec<String> {
-    let marker = "/instrument/";
-    let mut cursor = 0usize;
     let mut slugs = BTreeSet::new();
-    let bytes = html.as_bytes();
+    let document = Html::parse_document(html);
+    let Ok(selector) = Selector::parse("a[href]") else {
+        return Vec::new();
+    };
 
-    while let Some(index_relative) = html[cursor..].find(marker) {
-        let slug_start = cursor + index_relative + marker.len();
-        let mut slug_end = slug_start;
+    for element in document.select(&selector) {
+        let Some(href) = element.value().attr("href") else {
+            continue;
+        };
+        let Some(marker_idx) = href.find("/instrument/") else {
+            continue;
+        };
 
-        while slug_end < bytes.len() {
-            let ch = bytes[slug_end] as char;
-            if ch.is_ascii_alphanumeric() || ch == '-' {
-                slug_end += 1;
-                continue;
-            }
-            break;
+        let rest = &href[marker_idx + "/instrument/".len()..];
+        let slug = rest
+            .split(['/', '?', '#'])
+            .next()
+            .map(str::trim)
+            .unwrap_or("");
+        if slug.len() >= 4
+            && slug
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        {
+            slugs.insert(slug.to_ascii_lowercase());
         }
-
-        if slug_end > slug_start {
-            let slug = html[slug_start..slug_end].to_ascii_lowercase();
-            if slug.len() >= 4 {
-                slugs.insert(slug);
-            }
-        }
-
-        cursor = slug_end.max(slug_start + 1);
     }
 
     slugs.into_iter().collect()
+}
+
+fn validate_output_mode(
+    out_path: Option<&str>,
+    no_output: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if out_path.is_some() && no_output {
+        return Err("Use either --out PATH or --no-output, not both.".into());
+    }
+    if out_path.is_none() && !no_output {
+        return Err("Missing output mode. Provide --out PATH or --no-output.".into());
+    }
+
+    Ok(out_path.is_some())
+}
+
+fn should_persist_checkpoints(persist_output: bool, json: bool) -> bool {
+    if persist_output {
+        true
+    } else {
+        if !json {
+            eprintln!(
+                "  warning: --no-output selected, checkpoint updates are disabled to avoid data-loss traps"
+            );
+        }
+        false
+    }
+}
+
+fn build_tickers(
+    instruments: &[&InstrumentDefinition],
+    interval: Duration,
+) -> Result<Vec<Ticker>, DukascopyError> {
+    instruments
+        .iter()
+        .map(|instrument| {
+            Ticker::try_new(&instrument.base, &instrument.quote)
+                .map(|ticker| ticker.interval(interval))
+        })
+        .collect()
+}
+
+fn build_client_from_catalog(
+    catalog: &InstrumentCatalog,
+    instruments: &[&InstrumentDefinition],
+    concurrency: usize,
+) -> ConfiguredClient {
+    let max_concurrency = concurrency.max(1);
+    DukascopyClientBuilder::new()
+        .respect_market_hours(should_respect_market_hours(instruments))
+        .max_in_flight_requests(max_concurrency)
+        .max_download_concurrency(max_concurrency)
+        .with_instrument_catalog(catalog)
+        .build()
+}
+
+fn should_respect_market_hours(instruments: &[&InstrumentDefinition]) -> bool {
+    instruments
+        .iter()
+        .all(|instrument| matches!(instrument.asset_class, AssetClass::Fx | AssetClass::Metal))
+}
+
+fn create_sink(path: Option<&str>) -> Result<Box<dyn DataSink>, Box<dyn std::error::Error>> {
+    match path {
+        Some(path) => {
+            let path_lower = path.to_ascii_lowercase();
+            if path_lower.ends_with(".csv") {
+                return Ok(Box::new(CsvSink::open(path)?));
+            }
+            if path_lower.ends_with(".parquet") {
+                #[cfg(feature = "sinks-parquet")]
+                {
+                    return Ok(Box::new(ParquetSink::open(path)?));
+                }
+                #[cfg(not(feature = "sinks-parquet"))]
+                {
+                    return Err(
+                        "Parquet sink requires 'sinks-parquet' feature. Rebuild with --features sinks-parquet"
+                            .into(),
+                    );
+                }
+            }
+            Err(format!(
+                "Unsupported sink format for '{}'. Use .csv{}",
+                path,
+                if cfg!(feature = "sinks-parquet") {
+                    " or .parquet"
+                } else {
+                    ""
+                }
+            )
+            .into())
+        }
+        None => Ok(Box::new(NoopSink)),
+    }
 }
 
 fn split_symbol_slug(slug: &str) -> Option<(String, String)> {
@@ -574,33 +960,90 @@ fn split_symbol_slug(slug: &str) -> Option<(String, String)> {
     Some((base.to_string(), quote.to_string()))
 }
 
-async fn run_backfill(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let universe_path =
-        read_flag_value(args, "--universe").unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
+async fn run_backfill(args: &[String], ctx: &AppContext) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_backfill_usage();
+        return Ok(());
+    }
+    validate_flags(
+        args,
+        &[
+            "--universe",
+            "--symbols",
+            "--period",
+            "--interval",
+            "--checkpoint",
+            "--out",
+            "--concurrency",
+        ],
+        &["--no-output"],
+    )?;
+
+    let backfill_cfg = ctx.config.backfill.as_ref();
+    let universe_path = read_flag_value(args, "--universe")
+        .or_else(|| {
+            ctx.config
+                .global
+                .as_ref()
+                .and_then(|cfg| cfg.universe.clone())
+        })
+        .unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
     let checkpoint_path = read_flag_value(args, "--checkpoint")
+        .or_else(|| {
+            ctx.config
+                .global
+                .as_ref()
+                .and_then(|cfg| cfg.checkpoint.clone())
+        })
         .unwrap_or_else(|| DEFAULT_CHECKPOINT_PATH.to_string());
-    let symbols = parse_symbol_list(read_flag_value(args, "--symbols"));
-    let period = read_flag_value(args, "--period").unwrap_or_else(|| "30d".to_string());
-    let interval =
-        parse_duration(&read_flag_value(args, "--interval").unwrap_or_else(|| "1h".to_string()))?;
-    let out_path = read_flag_value(args, "--out");
-    let concurrency =
-        parse_positive_usize(read_flag_value(args, "--concurrency"), DEFAULT_CONCURRENCY)?;
+    let symbols = read_flag_value(args, "--symbols")
+        .map(|value| parse_symbol_list(Some(value)))
+        .or_else(|| backfill_cfg.and_then(|cfg| cfg.symbols.clone().map(normalize_symbols)))
+        .unwrap_or_default();
+    let period = read_flag_value(args, "--period")
+        .or_else(|| backfill_cfg.and_then(|cfg| cfg.period.clone()))
+        .unwrap_or_else(|| "30d".to_string());
+    let interval_raw = read_flag_value(args, "--interval")
+        .or_else(|| backfill_cfg.and_then(|cfg| cfg.interval.clone()))
+        .unwrap_or_else(|| "1h".to_string());
+    let interval = parse_duration(&interval_raw)?;
+    let out_path =
+        read_flag_value(args, "--out").or_else(|| backfill_cfg.and_then(|cfg| cfg.out.clone()));
+    let no_output = if has_flag(args, "--no-output") {
+        true
+    } else {
+        backfill_cfg.and_then(|cfg| cfg.no_output).unwrap_or(false)
+    };
+    let concurrency = parse_positive_usize(
+        read_flag_value(args, "--concurrency")
+            .or_else(|| backfill_cfg.and_then(|cfg| cfg.concurrency.map(|v| v.to_string())))
+            .or_else(|| {
+                ctx.config
+                    .global
+                    .as_ref()
+                    .and_then(|cfg| cfg.concurrency.map(|v| v.to_string()))
+            }),
+        DEFAULT_CONCURRENCY,
+    )?;
+    let persist_output = validate_output_mode(out_path.as_deref(), no_output)?;
+    let persist_checkpoints = should_persist_checkpoints(persist_output, ctx.json);
 
     let catalog = InstrumentCatalog::from_file(&universe_path)?;
     let selected = catalog.select_active(&symbols)?;
-    let tickers = build_tickers(&selected, interval);
-    let client = Arc::new(build_client_from_catalog(&catalog, &selected));
+    let tickers = build_tickers(&selected, interval)?;
+    let client = Arc::new(build_client_from_catalog(&catalog, &selected, concurrency));
     let checkpoint_store = FileCheckpointStore::open(&checkpoint_path)?;
     let mut sink = create_sink(out_path.as_deref())?;
 
-    println!(
-        "Backfill started for {} instruments (period={}, interval={}s, concurrency={})",
-        tickers.len(),
-        period,
-        interval.num_seconds(),
-        concurrency
-    );
+    if !ctx.json {
+        println!(
+            "Backfill started for {} instruments (period={}, interval={}s, concurrency={})",
+            tickers.len(),
+            period,
+            interval.num_seconds(),
+            concurrency
+        );
+    }
 
     let mut results = fetch_backfill_batches(&tickers, client, &period, concurrency).await;
     results.sort_by_key(|result| result.ticker.symbol());
@@ -618,26 +1061,43 @@ async fn run_backfill(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 }
                 let _ = sink.write_batch(&symbol, &history)?;
                 total_rows += history.len();
-                println!("  {} -> {} rows", symbol, history.len());
+                if !ctx.json {
+                    println!("  {} -> {} rows", symbol, history.len());
+                }
             }
             Err(err) => {
-                eprintln!("  {} -> error: {}", symbol, err);
+                if !ctx.json {
+                    eprintln!("  {} -> error: {}", symbol, err);
+                }
                 failures.push((symbol, err.to_string()));
             }
         }
     }
 
-    if !checkpoint_updates.is_empty() {
+    if persist_checkpoints && !checkpoint_updates.is_empty() {
         checkpoint_store.set_many(&checkpoint_updates)?;
     }
     sink.flush()?;
 
-    println!(
-        "Backfill finished. Total rows: {}. Checkpoint file: {}. Errors: {}",
-        total_rows,
-        checkpoint_path,
-        failures.len()
-    );
+    if ctx.json {
+        let payload = serde_json::json!({
+            "ok": failures.is_empty(),
+            "command": "backfill",
+            "rows": total_rows,
+            "checkpoint_file": checkpoint_path,
+            "errors": failures.len(),
+            "persist_output": persist_output,
+            "persist_checkpoints": persist_checkpoints,
+        });
+        println!("{}", payload);
+    } else {
+        println!(
+            "Backfill finished. Total rows: {}. Checkpoint file: {}. Errors: {}",
+            total_rows,
+            checkpoint_path,
+            failures.len()
+        );
+    }
 
     if failures.is_empty() {
         Ok(())
@@ -650,38 +1110,97 @@ async fn run_backfill(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
 }
 
-async fn run_update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let universe_path =
-        read_flag_value(args, "--universe").unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
+async fn run_update(args: &[String], ctx: &AppContext) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_update_usage();
+        return Ok(());
+    }
+    validate_flags(
+        args,
+        &[
+            "--universe",
+            "--symbols",
+            "--lookback",
+            "--interval",
+            "--checkpoint",
+            "--out",
+            "--concurrency",
+        ],
+        &["--no-output"],
+    )?;
+
+    let update_cfg = ctx.config.update.as_ref();
+    let universe_path = read_flag_value(args, "--universe")
+        .or_else(|| {
+            ctx.config
+                .global
+                .as_ref()
+                .and_then(|cfg| cfg.universe.clone())
+        })
+        .unwrap_or_else(|| DEFAULT_UNIVERSE_PATH.to_string());
     let checkpoint_path = read_flag_value(args, "--checkpoint")
+        .or_else(|| {
+            ctx.config
+                .global
+                .as_ref()
+                .and_then(|cfg| cfg.checkpoint.clone())
+        })
         .unwrap_or_else(|| DEFAULT_CHECKPOINT_PATH.to_string());
-    let symbols = parse_symbol_list(read_flag_value(args, "--symbols"));
-    let lookback =
-        parse_duration(&read_flag_value(args, "--lookback").unwrap_or_else(|| "7d".to_string()))?;
-    let interval =
-        parse_duration(&read_flag_value(args, "--interval").unwrap_or_else(|| "1h".to_string()))?;
-    let out_path = read_flag_value(args, "--out");
-    let concurrency =
-        parse_positive_usize(read_flag_value(args, "--concurrency"), DEFAULT_CONCURRENCY)?;
+    let symbols = read_flag_value(args, "--symbols")
+        .map(|value| parse_symbol_list(Some(value)))
+        .or_else(|| update_cfg.and_then(|cfg| cfg.symbols.clone().map(normalize_symbols)))
+        .unwrap_or_default();
+    let lookback_raw = read_flag_value(args, "--lookback")
+        .or_else(|| update_cfg.and_then(|cfg| cfg.lookback.clone()))
+        .unwrap_or_else(|| "7d".to_string());
+    let lookback = parse_duration(&lookback_raw)?;
+    let interval_raw = read_flag_value(args, "--interval")
+        .or_else(|| update_cfg.and_then(|cfg| cfg.interval.clone()))
+        .unwrap_or_else(|| "1h".to_string());
+    let interval = parse_duration(&interval_raw)?;
+    let out_path =
+        read_flag_value(args, "--out").or_else(|| update_cfg.and_then(|cfg| cfg.out.clone()));
+    let no_output = if has_flag(args, "--no-output") {
+        true
+    } else {
+        update_cfg.and_then(|cfg| cfg.no_output).unwrap_or(false)
+    };
+    let concurrency = parse_positive_usize(
+        read_flag_value(args, "--concurrency")
+            .or_else(|| update_cfg.and_then(|cfg| cfg.concurrency.map(|v| v.to_string())))
+            .or_else(|| {
+                ctx.config
+                    .global
+                    .as_ref()
+                    .and_then(|cfg| cfg.concurrency.map(|v| v.to_string()))
+            }),
+        DEFAULT_CONCURRENCY,
+    )?;
+    let persist_output = validate_output_mode(out_path.as_deref(), no_output)?;
+    let persist_checkpoints = should_persist_checkpoints(persist_output, ctx.json);
 
     let catalog = InstrumentCatalog::from_file(&universe_path)?;
     let selected = catalog.select_active(&symbols)?;
-    let tickers = build_tickers(&selected, interval);
-    let client = Arc::new(build_client_from_catalog(&catalog, &selected));
+    let tickers = build_tickers(&selected, interval)?;
+    let client = Arc::new(build_client_from_catalog(&catalog, &selected, concurrency));
     let checkpoint_store = FileCheckpointStore::open(&checkpoint_path)?;
     let mut sink = create_sink(out_path.as_deref())?;
 
-    println!(
-        "Incremental update started for {} instruments (lookback={}s, interval={}s, concurrency={})",
-        tickers.len(),
-        lookback.num_seconds(),
-        interval.num_seconds(),
-        concurrency
-    );
+    if !ctx.json {
+        println!(
+            "Incremental update started for {} instruments (lookback={}s, interval={}s, concurrency={})",
+            tickers.len(),
+            lookback.num_seconds(),
+            interval.num_seconds(),
+            concurrency
+        );
+    }
 
     let (jobs, skipped) = build_update_jobs(&tickers, &checkpoint_store, lookback)?;
     for ticker in skipped {
-        println!("  {} -> 0 rows (up-to-date)", ticker.symbol());
+        if !ctx.json {
+            println!("  {} -> 0 rows (up-to-date)", ticker.symbol());
+        }
     }
 
     let mut results = fetch_update_batches(jobs, client, concurrency).await;
@@ -700,26 +1219,43 @@ async fn run_update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let _ = sink.write_batch(&symbol, &rows)?;
                 total_rows += rows.len();
-                println!("  {} -> {} rows", symbol, rows.len());
+                if !ctx.json {
+                    println!("  {} -> {} rows", symbol, rows.len());
+                }
             }
             Err(err) => {
-                eprintln!("  {} -> error: {}", symbol, err);
+                if !ctx.json {
+                    eprintln!("  {} -> error: {}", symbol, err);
+                }
                 failures.push((symbol, err.to_string()));
             }
         }
     }
 
-    if !checkpoint_updates.is_empty() {
+    if persist_checkpoints && !checkpoint_updates.is_empty() {
         checkpoint_store.set_many(&checkpoint_updates)?;
     }
     sink.flush()?;
 
-    println!(
-        "Incremental update finished. Total rows: {}. Checkpoint file: {}. Errors: {}",
-        total_rows,
-        checkpoint_path,
-        failures.len()
-    );
+    if ctx.json {
+        let payload = serde_json::json!({
+            "ok": failures.is_empty(),
+            "command": "update",
+            "rows": total_rows,
+            "checkpoint_file": checkpoint_path,
+            "errors": failures.len(),
+            "persist_output": persist_output,
+            "persist_checkpoints": persist_checkpoints,
+        });
+        println!("{}", payload);
+    } else {
+        println!(
+            "Incremental update finished. Total rows: {}. Checkpoint file: {}. Errors: {}",
+            total_rows,
+            checkpoint_path,
+            failures.len()
+        );
+    }
 
     if failures.is_empty() {
         Ok(())
@@ -730,29 +1266,6 @@ async fn run_update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         )
         .into())
     }
-}
-
-fn build_tickers(instruments: &[&InstrumentDefinition], interval: Duration) -> Vec<Ticker> {
-    instruments
-        .iter()
-        .map(|instrument| Ticker::new(&instrument.base, &instrument.quote).interval(interval))
-        .collect()
-}
-
-fn build_client_from_catalog(
-    catalog: &InstrumentCatalog,
-    instruments: &[&InstrumentDefinition],
-) -> ConfiguredClient {
-    DukascopyClientBuilder::new()
-        .respect_market_hours(should_respect_market_hours(instruments))
-        .with_instrument_catalog(catalog)
-        .build()
-}
-
-fn should_respect_market_hours(instruments: &[&InstrumentDefinition]) -> bool {
-    instruments
-        .iter()
-        .all(|instrument| matches!(instrument.asset_class, AssetClass::Fx | AssetClass::Metal))
 }
 
 async fn fetch_backfill_batches(
@@ -895,31 +1408,26 @@ fn spawn_update_job(
     });
 }
 
-fn create_sink(path: Option<&str>) -> Result<Box<dyn DataSink>, Box<dyn std::error::Error>> {
-    match path {
-        Some(path) => {
-            let path_lower = path.to_ascii_lowercase();
-            if path_lower.ends_with(".csv") {
-                return Ok(Box::new(CsvSink::open(path)?));
-            }
-            if path_lower.ends_with(".parquet") {
-                return Ok(Box::new(ParquetSink::open(path)?));
-            }
-            Err(format!(
-                "Unsupported sink format for '{}'. Use .csv or .parquet",
-                path
-            )
-            .into())
-        }
-        None => Ok(Box::new(NoopSink)),
+#[cfg(feature = "sinks-parquet")]
+fn run_export(args: &[String], ctx: &AppContext) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_export_usage();
+        return Ok(());
     }
-}
+    validate_flags(args, &["--input", "--out"], &["--has-headers"])?;
 
-fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let export_cfg = ctx.config.export.as_ref();
     let input = read_flag_value(args, "--input")
+        .or_else(|| export_cfg.and_then(|cfg| cfg.input.clone()))
         .ok_or_else(|| "Missing required argument: --input PATH.csv".to_string())?;
     let out = read_flag_value(args, "--out")
+        .or_else(|| export_cfg.and_then(|cfg| cfg.out.clone()))
         .ok_or_else(|| "Missing required argument: --out PATH.parquet".to_string())?;
+    let has_headers = if has_flag(args, "--has-headers") {
+        true
+    } else {
+        export_cfg.and_then(|cfg| cfg.has_headers).unwrap_or(false)
+    };
 
     if !input.to_ascii_lowercase().ends_with(".csv") {
         return Err(format!("Unsupported export input '{}'. Expected .csv", input).into());
@@ -929,25 +1437,24 @@ fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
+        .has_headers(has_headers)
         .from_path(&input)?;
     let mut sink = ParquetSink::open(&out)?;
 
     let mut total_rows = 0usize;
     for (line_no, record_result) in reader.records().enumerate() {
+        let physical_line_no = line_no + if has_headers { 2 } else { 1 };
         let record = record_result.map_err(|err| {
             format!(
                 "Failed to read CSV record at line {} from '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
 
         if record.len() != 9 {
             return Err(format!(
                 "Invalid CSV row at line {} in '{}': expected 9 columns, got {}",
-                line_no + 1,
+                physical_line_no,
                 input,
                 record.len()
             )
@@ -955,14 +1462,18 @@ fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let symbol = record[0].to_string();
-        let pair = CurrencyPair::new(record[1].to_string(), record[2].to_string());
+        let pair =
+            CurrencyPair::try_new(record[1].to_string(), record[2].to_string()).map_err(|err| {
+                format!(
+                    "Invalid pair at line {} in '{}': {}",
+                    physical_line_no, input, err
+                )
+            })?;
         let timestamp = chrono::DateTime::parse_from_rfc3339(&record[3])
             .map_err(|err| {
                 format!(
                     "Invalid timestamp at line {} in '{}': {}",
-                    line_no + 1,
-                    input,
-                    err
+                    physical_line_no, input, err
                 )
             })?
             .with_timezone(&chrono::Utc);
@@ -970,41 +1481,31 @@ fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let rate = Decimal::from_str(&record[4]).map_err(|err| {
             format!(
                 "Invalid rate at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
         let bid = Decimal::from_str(&record[5]).map_err(|err| {
             format!(
                 "Invalid bid at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
         let ask = Decimal::from_str(&record[6]).map_err(|err| {
             format!(
                 "Invalid ask at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
         let bid_volume: f32 = record[7].parse().map_err(|err| {
             format!(
                 "Invalid bid_volume at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
         let ask_volume: f32 = record[8].parse().map_err(|err| {
             format!(
                 "Invalid ask_volume at line {} in '{}': {}",
-                line_no + 1,
-                input,
-                err
+                physical_line_no, input, err
             )
         })?;
 
@@ -1023,11 +1524,56 @@ fn run_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     sink.flush()?;
-    println!(
-        "Export complete. Input: {}. Output: {}. Rows: {}",
-        input, out, total_rows
-    );
+    if ctx.json {
+        let payload = serde_json::json!({
+            "ok": true,
+            "command": "export",
+            "input": input,
+            "output": out,
+            "rows": total_rows,
+            "has_headers": has_headers,
+        });
+        println!("{}", payload);
+    } else {
+        println!(
+            "Export complete. Input: {}. Output: {}. Rows: {}",
+            input, out, total_rows
+        );
+    }
     Ok(())
+}
+
+#[cfg(not(feature = "sinks-parquet"))]
+fn run_export(args: &[String], ctx: &AppContext) -> Result<(), Box<dyn std::error::Error>> {
+    if has_flag(args, "--help") {
+        print_export_usage();
+        return Ok(());
+    }
+
+    let export_cfg = ctx.config.export.as_ref();
+    let input =
+        read_flag_value(args, "--input").or_else(|| export_cfg.and_then(|cfg| cfg.input.clone()));
+    let out = read_flag_value(args, "--out").or_else(|| export_cfg.and_then(|cfg| cfg.out.clone()));
+    let has_headers = if has_flag(args, "--has-headers") {
+        Some(true)
+    } else {
+        export_cfg.and_then(|cfg| cfg.has_headers)
+    };
+
+    let details = match (input, out, has_headers) {
+        (Some(input), Some(out), Some(has_headers)) => format!(
+            " Requested input='{}', out='{}', has_headers={}.",
+            input, out, has_headers
+        ),
+        (Some(input), Some(out), None) => format!(" Requested input='{}', out='{}'.", input, out),
+        _ => String::new(),
+    };
+
+    Err(format!(
+        "Export command requires 'sinks-parquet' feature. Rebuild with --features sinks-parquet.{}",
+        details
+    )
+    .into())
 }
 
 fn deduplicate_by_timestamp(mut history: Vec<CurrencyExchange>) -> Vec<CurrencyExchange> {
@@ -1043,6 +1589,14 @@ fn parse_symbol_list(value: Option<String>) -> Vec<String> {
         .map(|part| part.trim())
         .filter(|part| !part.is_empty())
         .map(|part| part.to_ascii_uppercase())
+        .collect()
+}
+
+fn normalize_symbols(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|part| part.trim().to_ascii_uppercase())
+        .filter(|part| !part.is_empty())
         .collect()
 }
 
@@ -1062,6 +1616,80 @@ fn read_flag_value(args: &[String], flag: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+fn extract_global_options(
+    raw_args: &[String],
+) -> Result<(Vec<String>, GlobalCliOptions), Box<dyn std::error::Error>> {
+    let mut filtered = Vec::with_capacity(raw_args.len());
+    let mut options = GlobalCliOptions::default();
+    let mut i = 0usize;
+
+    while i < raw_args.len() {
+        match raw_args[i].as_str() {
+            "--json" => {
+                options.json = true;
+                i += 1;
+            }
+            "--config" => {
+                let Some(path) = raw_args.get(i + 1) else {
+                    return Err("Missing value for option '--config'".into());
+                };
+                if path.starts_with("--") {
+                    return Err("Missing value for option '--config'".into());
+                }
+                options.config_path = Some(path.clone());
+                i += 2;
+            }
+            _ => {
+                filtered.push(raw_args[i].clone());
+                i += 1;
+            }
+        }
+    }
+
+    Ok((filtered, options))
+}
+
+fn load_cli_config(path: &str) -> Result<CliConfig, Box<dyn std::error::Error>> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| format!("Failed to read config '{}': {}", path, err))?;
+    toml::from_str(&raw).map_err(|err| format!("Failed to parse config '{}': {}", path, err).into())
+}
+
+fn classify_exit_code(message: &str) -> i32 {
+    let usage_indicators = [
+        "Missing command",
+        "Unknown command",
+        "Unknown option",
+        "Missing value for option",
+        "Unexpected positional argument",
+        "Missing required argument",
+        "Use either --out PATH or --no-output",
+        "Missing output mode",
+    ];
+
+    if usage_indicators
+        .iter()
+        .any(|indicator| message.contains(indicator))
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn emit_cli_error(json: bool, code: i32, message: &str) {
+    if json {
+        let payload = serde_json::json!({
+            "ok": false,
+            "exit_code": code,
+            "error": message,
+        });
+        println!("{}", payload);
+    } else {
+        eprintln!("error: {}", message);
+    }
 }
 
 fn parse_positive_usize(
@@ -1089,7 +1717,11 @@ fn parse_duration(value: &str) -> Result<Duration, Box<dyn std::error::Error>> {
         return Err(format!("Invalid duration '{}'", value).into());
     }
 
-    let (num_str, unit) = normalized.split_at(normalized.len() - 1);
+    let (num_str, unit) = if normalized.ends_with("mo") {
+        normalized.split_at(normalized.len() - 2)
+    } else {
+        normalized.split_at(normalized.len() - 1)
+    };
     let amount: i64 = num_str
         .parse()
         .map_err(|_| format!("Invalid duration '{}'", value))?;
@@ -1103,6 +1735,8 @@ fn parse_duration(value: &str) -> Result<Duration, Box<dyn std::error::Error>> {
         "h" => Duration::hours(amount),
         "d" => Duration::days(amount),
         "w" => Duration::weeks(amount),
+        "mo" => Duration::days(amount * 30),
+        "y" => Duration::days(amount * 365),
         _ => return Err(format!("Unsupported duration unit in '{}'", value).into()),
     };
 
@@ -1111,6 +1745,10 @@ fn parse_duration(value: &str) -> Result<Duration, Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    use dukascopy_fx::CurrencyPair;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
     use super::*;
 
     #[test]
@@ -1119,6 +1757,8 @@ mod tests {
         assert_eq!(parse_duration("2h").unwrap(), Duration::hours(2));
         assert_eq!(parse_duration("7d").unwrap(), Duration::days(7));
         assert_eq!(parse_duration("2w").unwrap(), Duration::weeks(2));
+        assert_eq!(parse_duration("1mo").unwrap(), Duration::days(30));
+        assert_eq!(parse_duration("1y").unwrap(), Duration::days(365));
     }
 
     #[test]
@@ -1138,11 +1778,65 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_global_options() {
+        let args = vec![
+            "--json".to_string(),
+            "backfill".to_string(),
+            "--config".to_string(),
+            "fx_fetcher.toml".to_string(),
+            "--symbols".to_string(),
+            "EURUSD".to_string(),
+        ];
+
+        let (filtered, options) = extract_global_options(&args).unwrap();
+        assert!(options.json);
+        assert_eq!(options.config_path, Some("fx_fetcher.toml".to_string()));
+        assert_eq!(filtered, vec!["backfill", "--symbols", "EURUSD"]);
+    }
+
+    #[test]
+    fn test_classify_exit_code_usage_vs_runtime() {
+        assert_eq!(classify_exit_code("Missing command"), 2);
+        assert_eq!(classify_exit_code("Unknown option '--x'"), 2);
+        assert_eq!(classify_exit_code("network timeout"), 1);
+    }
+
+    #[test]
+    fn test_normalize_symbols() {
+        let symbols = normalize_symbols(vec![
+            " eurusd ".to_string(),
+            "AAPLUSUSD".to_string(),
+            "".to_string(),
+        ]);
+        assert_eq!(symbols, vec!["EURUSD", "AAPLUSUSD"]);
+    }
+
+    #[test]
+    fn test_validate_flags_rejects_unknown_and_missing_values() {
+        let args = vec!["--unknown".to_string()];
+        assert!(validate_flags(&args, &["--out"], &[]).is_err());
+
+        let args = vec!["--out".to_string()];
+        assert!(validate_flags(&args, &["--out"], &[]).is_err());
+
+        let args = vec!["--out".to_string(), "--next".to_string()];
+        assert!(validate_flags(&args, &["--out"], &["--next"]).is_err());
+    }
+
+    #[test]
+    fn test_validate_output_mode_rules() {
+        assert!(validate_output_mode(Some("data.csv"), false).unwrap());
+        assert!(!validate_output_mode(None, true).unwrap());
+        assert!(validate_output_mode(Some("data.csv"), true).is_err());
+        assert!(validate_output_mode(None, false).is_err());
+    }
+
+    #[test]
     fn test_deduplicate_by_timestamp_keeps_unique_rows() {
         let ts = Utc::now();
         let rows = vec![
             CurrencyExchange {
-                pair: CurrencyPair::new("EUR", "USD"),
+                pair: CurrencyPair::try_new("EUR", "USD").unwrap(),
                 rate: Decimal::from_str("1.10000").unwrap(),
                 timestamp: ts,
                 ask: Decimal::from_str("1.10010").unwrap(),
