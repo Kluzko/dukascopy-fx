@@ -48,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [beta, '1.76.0']
+        toolchain: [beta, "1.76.0"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,6 +60,10 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Remove lockfile for old Cargo compatibility
+        if: matrix.toolchain == '1.76.0'
+        run: rm -f Cargo.lock
 
       - name: Build check
         run: cargo check --all-targets --all-features
