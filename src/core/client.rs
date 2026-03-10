@@ -10,15 +10,16 @@ use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 #[cfg(feature = "logging")]
 use log::{debug, info, warn};
 use lru::LruCache;
+use parking_lot::Mutex;
 use reqwest::Client;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::{Decimal, RoundingStrategy};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::{Notify, OnceCell, Semaphore};
 
 #[cfg(not(feature = "logging"))]
 macro_rules! debug {
@@ -66,6 +67,12 @@ pub const DEFAULT_MAX_IN_FLIGHT_REQUESTS: usize = 8;
 /// Default maximum number of concurrent batch-download tasks.
 pub const DEFAULT_MAX_DOWNLOAD_CONCURRENCY: usize = 8;
 
+/// Default maximum number of parallel LZMA decompression jobs.
+pub const DEFAULT_MAX_DECOMPRESSION_JOBS: usize = 4;
+
+/// Default LRU cache size for parsed ticks
+pub const DEFAULT_PARSED_TICK_CACHE_SIZE: usize = 50;
+
 /// Maximum number of hours to backtrack when resolving at-or-before tick.
 pub const DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS: usize = 72;
 
@@ -111,7 +118,12 @@ pub struct ResolvedExchange {
 }
 
 fn normalize_code(code: &str) -> String {
-    code.trim().to_ascii_uppercase()
+    let trimmed = code.trim();
+    if trimmed.as_bytes().iter().any(|b| b.is_ascii_lowercase()) {
+        trimmed.to_ascii_uppercase()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 // Global default client instance
@@ -156,6 +168,8 @@ async fn get_default_client() -> &'static ConfiguredClient {
 pub struct ClientConfig {
     /// Cache size (number of hourly data files to cache)
     pub cache_size: usize,
+    /// Parsed tick cache size (number of hourly parsed entries to cache)
+    pub parsed_tick_cache_size: usize,
     /// HTTP request timeout in seconds
     pub timeout_secs: u64,
     /// Maximum idle connections per host
@@ -168,6 +182,8 @@ pub struct ClientConfig {
     pub max_in_flight_requests: usize,
     /// Maximum number of concurrent batch download tasks.
     pub max_download_concurrency: usize,
+    /// Maximum number of concurrent LZMA decompression jobs.
+    pub max_decompression_jobs: usize,
     /// Maximum number of hours to scan backward for at-or-before tick lookup.
     pub max_at_or_before_backtrack_hours: usize,
     /// Whether market-hours filtering should be applied (FX-style).
@@ -190,12 +206,14 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             cache_size: DEFAULT_CACHE_SIZE,
+            parsed_tick_cache_size: DEFAULT_PARSED_TICK_CACHE_SIZE,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             max_idle_connections: DEFAULT_MAX_IDLE_CONNECTIONS,
             max_retries: DEFAULT_MAX_RETRIES,
             retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
             max_in_flight_requests: DEFAULT_MAX_IN_FLIGHT_REQUESTS,
             max_download_concurrency: DEFAULT_MAX_DOWNLOAD_CONCURRENCY,
+            max_decompression_jobs: DEFAULT_MAX_DECOMPRESSION_JOBS,
             max_at_or_before_backtrack_hours: DEFAULT_MAX_AT_OR_BEFORE_BACKTRACK_HOURS,
             respect_market_hours: true,
             default_quote_currency: None,
@@ -244,6 +262,12 @@ impl DukascopyClientBuilder {
         self
     }
 
+    /// Sets parsed tick cache size (number of parsed hourly entries).
+    pub fn parsed_tick_cache_size(mut self, size: usize) -> Self {
+        self.config.parsed_tick_cache_size = size;
+        self
+    }
+
     /// Sets the HTTP request timeout in seconds.
     pub fn timeout_secs(mut self, timeout: u64) -> Self {
         self.config.timeout_secs = timeout;
@@ -277,6 +301,12 @@ impl DukascopyClientBuilder {
     /// Sets the maximum number of concurrent batch download tasks.
     pub fn max_download_concurrency(mut self, max_download_concurrency: usize) -> Self {
         self.config.max_download_concurrency = max_download_concurrency;
+        self
+    }
+
+    /// Sets the maximum number of concurrent LZMA decompression jobs.
+    pub fn max_decompression_jobs(mut self, max_decompression_jobs: usize) -> Self {
+        self.config.max_decompression_jobs = max_decompression_jobs;
         self
     }
 
@@ -404,9 +434,14 @@ impl DukascopyClientBuilder {
     pub fn build(self) -> ConfiguredClient {
         let config = self.config;
         let cache_size = config.cache_size.max(1);
+        let parsed_tick_cache_size = config.parsed_tick_cache_size.max(1);
         let max_in_flight_requests = config.max_in_flight_requests.max(1);
+        let max_decompression_jobs = config.max_decompression_jobs.max(1);
         let cache_capacity = NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::MIN);
+        let parsed_tick_cache_capacity =
+            NonZeroUsize::new(parsed_tick_cache_size).unwrap_or(NonZeroUsize::MIN);
         let cache = Arc::new(Mutex::new(LruCache::new(cache_capacity)));
+        let parsed_tick_cache = Arc::new(Mutex::new(LruCache::new(parsed_tick_cache_capacity)));
 
         let http_client = match Client::builder()
             .pool_max_idle_per_host(config.max_idle_connections)
@@ -438,7 +473,10 @@ impl DukascopyClientBuilder {
             config,
             http_client,
             cache,
+            parsed_tick_cache,
             request_limiter: Arc::new(Semaphore::new(max_in_flight_requests)),
+            decompress_limiter: Arc::new(Semaphore::new(max_decompression_jobs)),
+            in_flight_fetches: Arc::new(Mutex::new(HashMap::new())),
             instrument_provider: self.instrument_provider,
         }
     }
@@ -454,8 +492,74 @@ pub struct ConfiguredClient {
     config: ClientConfig,
     http_client: Client,
     cache: Arc<Mutex<LruCache<String, Arc<[u8]>>>>,
+    parsed_tick_cache: Arc<Mutex<LruCache<String, Arc<[ParsedTick]>>>>,
     request_limiter: Arc<Semaphore>,
+    decompress_limiter: Arc<Semaphore>,
+    in_flight_fetches: Arc<Mutex<HashMap<String, Arc<InFlightFetch>>>>,
     instrument_provider: Option<OverrideInstrumentProvider>,
+}
+
+#[derive(Debug)]
+struct InFlightFetch {
+    notify: Notify,
+    result: Mutex<Option<Result<Arc<[u8]>, DukascopyError>>>,
+}
+
+impl InFlightFetch {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+            result: Mutex::new(None),
+        }
+    }
+}
+
+struct InFlightLeaderGuard {
+    key: String,
+    in_flight_fetches: Arc<Mutex<HashMap<String, Arc<InFlightFetch>>>>,
+    state: Arc<InFlightFetch>,
+    completed: bool,
+}
+
+impl InFlightLeaderGuard {
+    #[inline]
+    fn new(
+        key: String,
+        in_flight_fetches: Arc<Mutex<HashMap<String, Arc<InFlightFetch>>>>,
+        state: Arc<InFlightFetch>,
+    ) -> Self {
+        Self {
+            key,
+            in_flight_fetches,
+            state,
+            completed: false,
+        }
+    }
+
+    fn finish(
+        mut self,
+        result: Result<Arc<[u8]>, DukascopyError>,
+    ) -> Result<Arc<[u8]>, DukascopyError> {
+        *self.state.result.lock() = Some(result.clone());
+        self.in_flight_fetches.lock().remove(&self.key);
+        self.state.notify.notify_waiters();
+        self.completed = true;
+        result
+    }
+}
+
+impl Drop for InFlightLeaderGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        *self.state.result.lock() = Some(Err(DukascopyError::Unknown(
+            "In-flight fetch cancelled".to_string(),
+        )));
+        self.in_flight_fetches.lock().remove(&self.key);
+        self.state.notify.notify_waiters();
+    }
 }
 
 impl ConfiguredClient {
@@ -717,14 +821,14 @@ impl ConfiguredClient {
         to: &str,
         timestamp: DateTime<Utc>,
     ) -> Result<Option<CurrencyExchange>, DukascopyError> {
-        let direct_pair = CurrencyPair::try_new(from.to_string(), to.to_string())?;
+        let direct_pair = CurrencyPair::try_new(from, to)?;
         match self.get_exchange_rate(&direct_pair, timestamp).await {
             Ok(exchange) => return Ok(Some(exchange)),
             Err(err) if err.is_not_found() => {}
             Err(err) => return Err(err),
         }
 
-        let inverse_pair = CurrencyPair::try_new(to.to_string(), from.to_string())?;
+        let inverse_pair = CurrencyPair::try_new(to, from)?;
         match self.get_exchange_rate(&inverse_pair, timestamp).await {
             Ok(exchange) => Ok(Some(DukascopyClient::invert_exchange(&exchange)?)),
             Err(err) if err.is_not_found() => Ok(None),
@@ -734,13 +838,18 @@ impl ConfiguredClient {
 
     fn resolve_code_alias(&self, code: &str) -> String {
         let mut current = normalize_code(code);
+        let Some(next) = self.config.code_aliases.get(&current) else {
+            return current;
+        };
+        if next == &current {
+            return current;
+        }
         let mut visited = HashSet::new();
+        visited.insert(current.clone());
+        current = next.clone();
 
         while let Some(next) = self.config.code_aliases.get(&current) {
-            if !visited.insert(current.clone()) {
-                break;
-            }
-            if next == &current {
+            if next == &current || !visited.insert(current.clone()) {
                 break;
             }
             current = next.clone();
@@ -779,7 +888,7 @@ impl ConfiguredClient {
         }
 
         let mut results: Vec<CurrencyExchange> = Vec::new();
-        let mut hour_cache: Option<(DateTime<Utc>, Vec<ParsedTick>)> = None;
+        let mut hour_cache: Option<(DateTime<Utc>, Arc<[ParsedTick]>)> = None;
         let mut hour_fallback_cache: Option<(
             DateTime<Utc>,
             Option<u32>,
@@ -812,15 +921,11 @@ impl ConfiguredClient {
 
                 match self.fetch_cached(&url).await {
                     Ok(data) => {
-                        DukascopyParser::validate_decompressed_data(&data)?;
-                        let mut parsed_ticks = Vec::with_capacity(data.len() / TICK_SIZE_BYTES);
-                        for tick in DukascopyParser::iter_ticks(&data, config) {
-                            parsed_ticks.push(tick?);
-                        }
+                        let parsed_ticks = self.get_or_parse_ticks(&url, &data, config)?;
                         hour_cache = Some((hour_start, parsed_ticks));
                     }
                     Err(DukascopyError::DataNotFound) => {
-                        hour_cache = Some((hour_start, Vec::new()));
+                        hour_cache = Some((hour_start, Arc::from(Vec::<ParsedTick>::new())));
                     }
                     Err(e) => return Err(e),
                 }
@@ -904,21 +1009,90 @@ impl ConfiguredClient {
         build_tick_url(&self.config.base_url, pair_symbol, year, month, day, hour)
     }
 
-    /// Fetches data from URL with caching.
-    async fn fetch_cached(&self, url: &str) -> Result<Arc<[u8]>, DukascopyError> {
-        // Check cache first
-        {
-            let mut cache_guard = self
-                .cache
-                .lock()
-                .map_err(|e| DukascopyError::CacheError(format!("Cache lock poisoned: {}", e)))?;
+    #[inline]
+    fn cache_get_decompressed(&self, url: &str) -> Option<Arc<[u8]>> {
+        let mut cache_guard = self.cache.lock();
+        cache_guard.get(url).cloned()
+    }
 
-            if let Some(data) = cache_guard.get(url) {
-                debug!("Cache hit for: {}", url);
-                return Ok(Arc::clone(data));
-            }
+    #[inline]
+    fn cache_put_decompressed(&self, url: &str, data: Arc<[u8]>) {
+        let mut cache_guard = self.cache.lock();
+        cache_guard.put(url.to_string(), data);
+    }
+
+    #[inline]
+    fn parsed_cache_get(&self, url: &str) -> Option<Arc<[ParsedTick]>> {
+        let mut cache_guard = self.parsed_tick_cache.lock();
+        cache_guard.get(url).cloned()
+    }
+
+    #[inline]
+    fn parsed_cache_put(&self, url: &str, ticks: Arc<[ParsedTick]>) {
+        let mut cache_guard = self.parsed_tick_cache.lock();
+        cache_guard.put(url.to_string(), ticks);
+    }
+
+    fn get_or_parse_ticks(
+        &self,
+        url: &str,
+        data: &[u8],
+        config: InstrumentConfig,
+    ) -> Result<Arc<[ParsedTick]>, DukascopyError> {
+        if let Some(ticks) = self.parsed_cache_get(url) {
+            return Ok(ticks);
         }
 
+        DukascopyParser::validate_decompressed_data(data)?;
+        let mut parsed_ticks = Vec::with_capacity(data.len() / TICK_SIZE_BYTES);
+        for tick in DukascopyParser::iter_ticks(data, config) {
+            parsed_ticks.push(tick?);
+        }
+
+        let parsed_ticks: Arc<[ParsedTick]> = parsed_ticks.into();
+        self.parsed_cache_put(url, Arc::clone(&parsed_ticks));
+        Ok(parsed_ticks)
+    }
+
+    /// Fetches data from URL with caching.
+    async fn fetch_cached(&self, url: &str) -> Result<Arc<[u8]>, DukascopyError> {
+        loop {
+            if let Some(data) = self.cache_get_decompressed(url) {
+                debug!("Cache hit for: {}", url);
+                return Ok(data);
+            }
+
+            // Singleflight: only one task fetches/decompresses URL on cache miss.
+            let (state, is_leader) = {
+                let mut inflight = self.in_flight_fetches.lock();
+                if let Some(state) = inflight.get(url) {
+                    (Arc::clone(state), false)
+                } else {
+                    let state = Arc::new(InFlightFetch::new());
+                    inflight.insert(url.to_string(), Arc::clone(&state));
+                    (state, true)
+                }
+            };
+
+            if !is_leader {
+                state.notify.notified().await;
+                if let Some(result) = state.result.lock().as_ref() {
+                    return result.clone();
+                }
+                continue;
+            }
+
+            let guard = InFlightLeaderGuard::new(
+                url.to_string(),
+                Arc::clone(&self.in_flight_fetches),
+                Arc::clone(&state),
+            );
+            let fetch_result = self.fetch_uncached_and_store(url).await;
+            return guard.finish(fetch_result);
+        }
+    }
+
+    async fn fetch_uncached_and_store(&self, url: &str) -> Result<Arc<[u8]>, DukascopyError> {
         debug!("Cache miss for: {}", url);
         info!("Fetching data from: {}", url);
 
@@ -1002,6 +1176,9 @@ impl ConfiguredClient {
         }
 
         // Decompress in blocking task
+        let _decompression_permit = self.decompress_limiter.acquire().await.map_err(|_| {
+            DukascopyError::Unknown("Decompression limiter was closed unexpectedly".to_string())
+        })?;
         let decompressed = tokio::task::spawn_blocking(move || {
             let mut output = Vec::with_capacity(bytes.len() * 4);
             lzma_rs::lzma_decompress(&mut Cursor::new(&bytes), &mut output)?;
@@ -1016,14 +1193,7 @@ impl ConfiguredClient {
         debug!("Fetched and decompressed {} bytes", decompressed.len());
         let decompressed: Arc<[u8]> = decompressed.into();
 
-        // Cache the result
-        {
-            let mut cache_guard = self
-                .cache
-                .lock()
-                .map_err(|e| DukascopyError::CacheError(format!("Cache lock poisoned: {}", e)))?;
-            cache_guard.put(url.to_string(), Arc::clone(&decompressed));
-        }
+        self.cache_put_decompressed(url, Arc::clone(&decompressed));
 
         Ok(decompressed)
     }
@@ -1054,22 +1224,15 @@ impl ConfiguredClient {
 
     /// Clears the cache.
     pub fn clear_cache(&self) -> Result<(), DukascopyError> {
-        let mut cache_guard = self
-            .cache
-            .lock()
-            .map_err(|e| DukascopyError::CacheError(format!("Cache lock poisoned: {}", e)))?;
-        cache_guard.clear();
+        self.cache.lock().clear();
+        self.parsed_tick_cache.lock().clear();
         debug!("Cache cleared");
         Ok(())
     }
 
     /// Returns the current number of cached entries.
     pub fn cache_len(&self) -> Result<usize, DukascopyError> {
-        let cache_guard = self
-            .cache
-            .lock()
-            .map_err(|e| DukascopyError::CacheError(format!("Cache lock poisoned: {}", e)))?;
-        Ok(cache_guard.len())
+        Ok(self.cache.lock().len())
     }
 }
 
@@ -1272,7 +1435,7 @@ impl DukascopyClient {
         first_leg: &CurrencyExchange,
         second_leg: &CurrencyExchange,
     ) -> Result<CurrencyExchange, DukascopyError> {
-        let pair = CurrencyPair::try_new(symbol.to_string(), quote.to_string())?;
+        let pair = CurrencyPair::try_new(symbol, quote)?;
         let rate = first_leg.rate * second_leg.rate;
         let bid = (first_leg.bid * second_leg.bid).min(first_leg.ask * second_leg.ask);
         let ask = (first_leg.ask * second_leg.ask).max(first_leg.bid * second_leg.bid);
@@ -1412,6 +1575,10 @@ mod tests {
     fn test_default_config() {
         let config = ClientConfig::default();
         assert_eq!(config.cache_size, DEFAULT_CACHE_SIZE);
+        assert_eq!(
+            config.parsed_tick_cache_size,
+            DEFAULT_PARSED_TICK_CACHE_SIZE
+        );
         assert_eq!(config.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(config.max_retries, DEFAULT_MAX_RETRIES);
         assert_eq!(config.retry_base_delay_ms, DEFAULT_RETRY_BASE_DELAY_MS);
@@ -1422,6 +1589,10 @@ mod tests {
         assert_eq!(
             config.max_download_concurrency,
             DEFAULT_MAX_DOWNLOAD_CONCURRENCY
+        );
+        assert_eq!(
+            config.max_decompression_jobs,
+            DEFAULT_MAX_DECOMPRESSION_JOBS
         );
         assert_eq!(
             config.max_at_or_before_backtrack_hours,
@@ -1453,11 +1624,13 @@ mod tests {
     fn test_builder_chaining() {
         let client = DukascopyClientBuilder::new()
             .cache_size(200)
+            .parsed_tick_cache_size(150)
             .timeout_secs(45)
             .max_retries(5)
             .retry_base_delay_ms(150)
             .max_in_flight_requests(4)
             .max_download_concurrency(3)
+            .max_decompression_jobs(2)
             .max_at_or_before_backtrack_hours(24)
             .respect_market_hours(false)
             .default_quote_currency("pln")
@@ -1468,11 +1641,13 @@ mod tests {
             .build();
 
         assert_eq!(client.config().cache_size, 200);
+        assert_eq!(client.config().parsed_tick_cache_size, 150);
         assert_eq!(client.config().timeout_secs, 45);
         assert_eq!(client.config().max_retries, 5);
         assert_eq!(client.config().retry_base_delay_ms, 150);
         assert_eq!(client.config().max_in_flight_requests, 4);
         assert_eq!(client.config().max_download_concurrency, 3);
+        assert_eq!(client.config().max_decompression_jobs, 2);
         assert_eq!(client.config().max_at_or_before_backtrack_hours, 24);
         assert!(!client.config().respect_market_hours);
         assert_eq!(client.default_quote_currency(), Some("PLN"));
@@ -1513,6 +1688,16 @@ mod tests {
         let requested = CurrencyPair::new("SP500", "USD");
         let resolved = client.resolve_pair_alias(&requested).unwrap();
         assert_eq!(resolved.as_symbol(), "USA500IDXUSD");
+    }
+
+    #[test]
+    fn test_code_alias_cycle_returns_stable_value() {
+        let client = DukascopyClientBuilder::new()
+            .code_alias("a", "b")
+            .code_alias("b", "a")
+            .build();
+        assert_eq!(client.resolve_code_alias("a"), "A");
+        assert_eq!(client.resolve_code_alias("b"), "B");
     }
 
     #[test]

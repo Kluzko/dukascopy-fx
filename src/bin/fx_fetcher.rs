@@ -1462,13 +1462,12 @@ fn run_export(args: &[String], ctx: &AppContext) -> Result<(), Box<dyn std::erro
         }
 
         let symbol = record[0].to_string();
-        let pair =
-            CurrencyPair::try_new(record[1].to_string(), record[2].to_string()).map_err(|err| {
-                format!(
-                    "Invalid pair at line {} in '{}': {}",
-                    physical_line_no, input, err
-                )
-            })?;
+        let pair = CurrencyPair::try_new(&record[1], &record[2]).map_err(|err| {
+            format!(
+                "Invalid pair at line {} in '{}': {}",
+                physical_line_no, input, err
+            )
+        })?;
         let timestamp = chrono::DateTime::parse_from_rfc3339(&record[3])
             .map_err(|err| {
                 format!(

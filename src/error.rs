@@ -20,7 +20,7 @@ pub enum TransportErrorKind {
 }
 
 /// Errors that can occur when using the Dukascopy FX library.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum DukascopyError {
     /// Structured transport/network error.
     #[error("Transport error ({kind:?}, status={status:?}): {message}")]

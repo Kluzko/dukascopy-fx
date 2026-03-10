@@ -67,3 +67,14 @@ Suggested report columns:
 ## CI recommendation
 
 Run benchmark suite on a dedicated performance job (nightly/scheduled) and publish trend artifacts. Avoid mixing performance thresholds with per-PR unit tests, because hosted runner variance is high.
+
+## HTTP load tests (k6)
+
+CPU micro-benchmarks do not capture saturation effects from HTTP concurrency.
+
+For controlled high-amplitude HTTP testing use:
+
+- script: `tests/load/k6_stress.js`
+- guide: `docs/LOAD_TESTING.md`
+
+This load profile uses ramp-up arrival rate and built-in error/latency thresholds instead of unbounded traffic patterns.

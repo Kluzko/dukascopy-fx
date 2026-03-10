@@ -10,7 +10,7 @@ Library-first Rust crate for Dukascopy historical market data (FX, metals, indic
 
 ```toml
 [dependencies]
-dukascopy-fx = "0.5.0"
+dukascopy-fx = "0.5.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -32,9 +32,17 @@ async fn main() -> dukascopy_fx::Result<()> {
 - unified request model (`RateRequest`) for pair/symbol flows
 - strict + explicit parse modes (`RequestParseMode`)
 - typed period API (`Period`) and tuned batch concurrency
+- deduplicated concurrent fetches + parsed-tick cache reuse for better throughput
 - checkpoint-driven incremental updates
 - CLI fetcher for repeatable data jobs
 - dataframe-friendly interop helpers (`flatten_rows`, `FlatExchangeRow`)
+
+## What's New in 0.5.1
+
+- Faster hot paths (request parsing, pair construction, mixed high-load scenarios).
+- Safer cache-miss concurrency via singleflight with cancellation-safe wakeups.
+- New client tuning knobs: `parsed_tick_cache_size(...)` and `max_decompression_jobs(...)`.
+- Added controlled HTTP load/stress testing guide (`docs/LOAD_TESTING.md`) and `k6` script.
 
 ## Copy-Paste Workflows
 
@@ -129,6 +137,7 @@ Advanced client configuration:
 - `conversion_mode(...)`, `bridge_currencies(...)`
 - `code_alias("AAPL", "AAPLUS")`
 - `max_in_flight_requests(...)`, `max_download_concurrency(...)`
+- `parsed_tick_cache_size(...)`, `max_decompression_jobs(...)`
 - `max_at_or_before_backtrack_hours(...)`
 
 ## FAQ (common issues)

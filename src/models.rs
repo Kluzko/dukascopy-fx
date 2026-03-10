@@ -1,12 +1,11 @@
 //! Data models for currency pairs and exchange rates.
 
-use crate::core::instrument::{
-    resolve_instrument_config, CurrencyCategory, HasInstrumentConfig, InstrumentConfig,
-};
+use crate::core::instrument::{resolve_instrument_config, HasInstrumentConfig, InstrumentConfig};
 use crate::error::DukascopyError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 use std::fmt;
 use std::str::FromStr;
 
@@ -28,8 +27,8 @@ use std::str::FromStr;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CurrencyPair {
-    from: String,
-    to: String,
+    from: SmolStr,
+    to: SmolStr,
 }
 
 /// Unified request for rate queries.
@@ -63,9 +62,8 @@ impl RateRequest {
 
     /// Creates a symbol request with validation.
     pub fn symbol(symbol: impl Into<String>) -> Result<Self, DukascopyError> {
-        let normalized = symbol.into().trim().to_ascii_uppercase();
-        CurrencyPair::validate_currency_code(&normalized)?;
-        Ok(Self::Symbol(normalized))
+        let raw = symbol.into();
+        Self::symbol_from_trimmed(raw.trim())
     }
 
     /// Returns pair if this is a pair request.
@@ -95,33 +93,33 @@ impl RateRequest {
 
         match mode {
             RequestParseMode::Auto => {
-                if normalized.contains('/') {
-                    return Ok(Self::Pair(CurrencyPair::from_str(normalized)?));
+                if let Some(pair) = parse_compact_pair_slash(normalized) {
+                    return Ok(Self::Pair(pair));
                 }
 
-                if is_likely_forex_pair_shorthand(normalized) {
-                    return Ok(Self::Pair(CurrencyPair::try_new(
-                        &normalized[0..3],
-                        &normalized[3..6],
-                    )?));
+                if normalized.as_bytes().contains(&b'/') {
+                    return Ok(Self::Pair(parse_pair_with_slash(normalized)?));
                 }
 
-                Self::symbol(normalized)
+                if let Some((from, to)) = split_known_fx_pair_shorthand(normalized) {
+                    // Parsed shorthand is guaranteed to be 6 ASCII letters, so this is a safe
+                    // normalization-only construction path.
+                    return Ok(Self::Pair(CurrencyPair::new(from, to)));
+                }
+
+                Self::symbol_from_trimmed(normalized)
             }
             RequestParseMode::PairOnly => {
-                if normalized.contains('/') {
-                    return Ok(Self::Pair(CurrencyPair::from_str(normalized)?));
+                if let Some(pair) = parse_compact_pair_slash(normalized) {
+                    return Ok(Self::Pair(pair));
                 }
 
-                if normalized.len() == 6
-                    && normalized
-                        .chars()
-                        .all(|ch| ch.is_ascii_alphanumeric() && !ch.is_ascii_digit())
-                {
-                    return Ok(Self::Pair(CurrencyPair::try_new(
-                        &normalized[0..3],
-                        &normalized[3..6],
-                    )?));
+                if normalized.as_bytes().contains(&b'/') {
+                    return Ok(Self::Pair(parse_pair_with_slash(normalized)?));
+                }
+
+                if let Some((from, to)) = split_ascii_pair_shorthand(normalized) {
+                    return Ok(Self::Pair(CurrencyPair::new(from, to)));
                 }
 
                 Err(DukascopyError::InvalidRequest(format!(
@@ -129,8 +127,22 @@ impl RateRequest {
                     normalized
                 )))
             }
-            RequestParseMode::SymbolOnly => Self::symbol(normalized),
+            RequestParseMode::SymbolOnly => Self::symbol_from_trimmed(normalized),
         }
+    }
+
+    #[inline]
+    fn symbol_from_trimmed(trimmed: &str) -> Result<Self, DukascopyError> {
+        let normalized = normalize_code_checked(trimmed.to_string()).map_err(|err| match err {
+            DukascopyError::InvalidCurrencyCode { reason, .. } => {
+                DukascopyError::InvalidCurrencyCode {
+                    code: trimmed.to_ascii_uppercase(),
+                    reason,
+                }
+            }
+            other => other,
+        })?;
+        Ok(Self::Symbol(normalized))
     }
 }
 
@@ -163,18 +175,237 @@ impl FromStr for RateRequest {
     }
 }
 
-fn is_likely_forex_pair_shorthand(input: &str) -> bool {
-    let normalized = input.trim().to_ascii_uppercase();
-    if normalized.len() != 6 || !normalized.chars().all(|ch| ch.is_ascii_alphabetic()) {
-        return false;
+#[inline]
+fn split_known_fx_pair_shorthand(input: &str) -> Option<(&str, &str)> {
+    let (from, to) = split_ascii_pair_shorthand(input)?;
+
+    if is_known_fx_code_case_insensitive(from.as_bytes())
+        && is_known_fx_code_case_insensitive(to.as_bytes())
+    {
+        Some((from, to))
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn split_ascii_pair_shorthand(input: &str) -> Option<(&str, &str)> {
+    let bytes = input.as_bytes();
+    if bytes.len() != 6 {
+        return None;
     }
 
-    let from = &normalized[0..3];
-    let to = &normalized[3..6];
+    if !bytes[0].is_ascii_alphabetic()
+        || !bytes[1].is_ascii_alphabetic()
+        || !bytes[2].is_ascii_alphabetic()
+        || !bytes[3].is_ascii_alphabetic()
+        || !bytes[4].is_ascii_alphabetic()
+        || !bytes[5].is_ascii_alphabetic()
+    {
+        return None;
+    }
 
-    !matches!(CurrencyCategory::from_code(from), CurrencyCategory::Unknown)
-        && !matches!(CurrencyCategory::from_code(to), CurrencyCategory::Unknown)
+    Some((&input[0..3], &input[3..6]))
 }
+
+#[inline]
+fn is_known_fx_code_case_insensitive(code: &[u8]) -> bool {
+    let Some(value) = code3_ascii_upper(code) else {
+        return false;
+    };
+
+    matches!(
+        value,
+        CODE_JPY
+            | CODE_RUB
+            | CODE_XAU
+            | CODE_XAG
+            | CODE_XPT
+            | CODE_XPD
+            | CODE_USD
+            | CODE_EUR
+            | CODE_GBP
+            | CODE_AUD
+            | CODE_NZD
+            | CODE_CAD
+            | CODE_CHF
+            | CODE_SEK
+            | CODE_NOK
+            | CODE_DKK
+            | CODE_SGD
+            | CODE_HKD
+            | CODE_MXN
+            | CODE_ZAR
+            | CODE_TRY
+            | CODE_PLN
+            | CODE_CZK
+            | CODE_HUF
+            | CODE_CNH
+            | CODE_CNY
+            | CODE_INR
+            | CODE_THB
+            | CODE_KRW
+            | CODE_TWD
+            | CODE_BRL
+            | CODE_ILS
+    )
+}
+
+#[inline]
+fn parse_compact_pair_slash(input: &str) -> Option<CurrencyPair> {
+    let bytes = input.as_bytes();
+    if bytes.len() != 7 || bytes[3] != b'/' {
+        return None;
+    }
+
+    if !is_ascii_alphanumeric3(&bytes[0..3]) || !is_ascii_alphanumeric3(&bytes[4..7]) {
+        return None;
+    }
+
+    Some(CurrencyPair::new(&input[0..3], &input[4..7]))
+}
+
+#[inline]
+fn parse_pair_with_slash(input: &str) -> Result<CurrencyPair, DukascopyError> {
+    let Some((from_raw, to_raw)) = input.split_once('/') else {
+        return Err(DukascopyError::InvalidCurrencyCode {
+            code: input.to_string(),
+            reason: "Invalid pair format. Expected 'BASE/QUOTE'".to_string(),
+        });
+    };
+
+    if to_raw.as_bytes().contains(&b'/') {
+        return Err(DukascopyError::InvalidCurrencyCode {
+            code: input.to_string(),
+            reason: "Invalid pair format. Expected 'BASE/QUOTE'".to_string(),
+        });
+    }
+
+    CurrencyPair::try_new(from_raw.trim(), to_raw.trim())
+}
+
+#[inline]
+fn is_ascii_alphanumeric3(bytes: &[u8]) -> bool {
+    bytes[0].is_ascii_alphanumeric()
+        && bytes[1].is_ascii_alphanumeric()
+        && bytes[2].is_ascii_alphanumeric()
+}
+
+#[inline]
+fn normalize_code_checked(mut code: String) -> Result<String, DukascopyError> {
+    let len = code.len();
+    if !(2..=12).contains(&len) {
+        return Err(DukascopyError::InvalidCurrencyCode {
+            code,
+            reason: "Instrument code must be between 2 and 12 characters".to_string(),
+        });
+    }
+
+    let mut has_lowercase = false;
+    for &b in code.as_bytes() {
+        if !b.is_ascii_alphanumeric() {
+            return Err(DukascopyError::InvalidCurrencyCode {
+                code,
+                reason: "Instrument code must contain only letters or digits".to_string(),
+            });
+        }
+        has_lowercase |= b.is_ascii_lowercase();
+    }
+
+    if has_lowercase {
+        code.make_ascii_uppercase();
+    }
+
+    Ok(code)
+}
+
+#[inline]
+fn normalize_code_checked_smol(code: &str) -> Result<SmolStr, DukascopyError> {
+    let len = code.len();
+    if !(2..=12).contains(&len) {
+        return Err(DukascopyError::InvalidCurrencyCode {
+            code: code.to_string(),
+            reason: "Instrument code must be between 2 and 12 characters".to_string(),
+        });
+    }
+
+    let bytes = code.as_bytes();
+    let mut has_lowercase = false;
+    for &b in bytes {
+        if !b.is_ascii_alphanumeric() {
+            return Err(DukascopyError::InvalidCurrencyCode {
+                code: code.to_string(),
+                reason: "Instrument code must contain only letters or digits".to_string(),
+            });
+        }
+        has_lowercase |= b.is_ascii_lowercase();
+    }
+
+    if has_lowercase {
+        return Ok(SmolStr::new(code.to_ascii_uppercase()));
+    }
+
+    Ok(SmolStr::new(code))
+}
+
+#[inline]
+fn normalize_ascii_upper(code: &str) -> SmolStr {
+    if code.as_bytes().iter().any(|b| b.is_ascii_lowercase()) {
+        return SmolStr::new(code.to_ascii_uppercase());
+    }
+    SmolStr::new(code)
+}
+
+#[inline]
+const fn code3(a: u8, b: u8, c: u8) -> u32 {
+    ((a as u32) << 16) | ((b as u32) << 8) | (c as u32)
+}
+
+#[inline]
+fn code3_ascii_upper(code: &[u8]) -> Option<u32> {
+    if code.len() != 3 {
+        return None;
+    }
+
+    Some(code3(
+        code[0].to_ascii_uppercase(),
+        code[1].to_ascii_uppercase(),
+        code[2].to_ascii_uppercase(),
+    ))
+}
+
+const CODE_JPY: u32 = code3(b'J', b'P', b'Y');
+const CODE_RUB: u32 = code3(b'R', b'U', b'B');
+const CODE_XAU: u32 = code3(b'X', b'A', b'U');
+const CODE_XAG: u32 = code3(b'X', b'A', b'G');
+const CODE_XPT: u32 = code3(b'X', b'P', b'T');
+const CODE_XPD: u32 = code3(b'X', b'P', b'D');
+const CODE_USD: u32 = code3(b'U', b'S', b'D');
+const CODE_EUR: u32 = code3(b'E', b'U', b'R');
+const CODE_GBP: u32 = code3(b'G', b'B', b'P');
+const CODE_AUD: u32 = code3(b'A', b'U', b'D');
+const CODE_NZD: u32 = code3(b'N', b'Z', b'D');
+const CODE_CAD: u32 = code3(b'C', b'A', b'D');
+const CODE_CHF: u32 = code3(b'C', b'H', b'F');
+const CODE_SEK: u32 = code3(b'S', b'E', b'K');
+const CODE_NOK: u32 = code3(b'N', b'O', b'K');
+const CODE_DKK: u32 = code3(b'D', b'K', b'K');
+const CODE_SGD: u32 = code3(b'S', b'G', b'D');
+const CODE_HKD: u32 = code3(b'H', b'K', b'D');
+const CODE_MXN: u32 = code3(b'M', b'X', b'N');
+const CODE_ZAR: u32 = code3(b'Z', b'A', b'R');
+const CODE_TRY: u32 = code3(b'T', b'R', b'Y');
+const CODE_PLN: u32 = code3(b'P', b'L', b'N');
+const CODE_CZK: u32 = code3(b'C', b'Z', b'K');
+const CODE_HUF: u32 = code3(b'H', b'U', b'F');
+const CODE_CNH: u32 = code3(b'C', b'N', b'H');
+const CODE_CNY: u32 = code3(b'C', b'N', b'Y');
+const CODE_INR: u32 = code3(b'I', b'N', b'R');
+const CODE_THB: u32 = code3(b'T', b'H', b'B');
+const CODE_KRW: u32 = code3(b'K', b'R', b'W');
+const CODE_TWD: u32 = code3(b'T', b'W', b'D');
+const CODE_BRL: u32 = code3(b'B', b'R', b'L');
+const CODE_ILS: u32 = code3(b'I', b'L', b'S');
 
 impl CurrencyPair {
     /// Creates a new currency pair.
@@ -189,9 +420,11 @@ impl CurrencyPair {
     /// let pair = CurrencyPair::new("EUR", "USD");
     /// ```
     pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
+        let from = from.into();
+        let to = to.into();
         Self {
-            from: from.into().to_ascii_uppercase(),
-            to: to.into().to_ascii_uppercase(),
+            from: normalize_ascii_upper(&from),
+            to: normalize_ascii_upper(&to),
         }
     }
 
@@ -215,33 +448,15 @@ impl CurrencyPair {
     /// assert!(invalid.is_err());
     /// ```
     pub fn try_new(from: impl Into<String>, to: impl Into<String>) -> Result<Self, DukascopyError> {
-        let from_str = from.into();
-        let to_str = to.into();
-
-        Self::validate_currency_code(&from_str)?;
-        Self::validate_currency_code(&to_str)?;
+        let from = from.into();
+        let to = to.into();
+        let from_norm = normalize_code_checked_smol(&from)?;
+        let to_norm = normalize_code_checked_smol(&to)?;
 
         Ok(Self {
-            from: from_str.to_ascii_uppercase(),
-            to: to_str.to_ascii_uppercase(),
+            from: from_norm,
+            to: to_norm,
         })
-    }
-
-    /// Validates an instrument code.
-    fn validate_currency_code(code: &str) -> Result<(), DukascopyError> {
-        if code.len() < 2 || code.len() > 12 {
-            return Err(DukascopyError::InvalidCurrencyCode {
-                code: code.to_string(),
-                reason: "Instrument code must be between 2 and 12 characters".to_string(),
-            });
-        }
-        if !code.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(DukascopyError::InvalidCurrencyCode {
-                code: code.to_string(),
-                reason: "Instrument code must contain only letters or digits".to_string(),
-            });
-        }
-        Ok(())
     }
 
     /// Returns the source currency code.
@@ -259,7 +474,10 @@ impl CurrencyPair {
     /// Returns the pair as a combined string (e.g., "EURUSD").
     #[inline]
     pub fn as_symbol(&self) -> String {
-        format!("{}{}", self.from, self.to)
+        let mut symbol = String::with_capacity(self.from.len() + self.to.len());
+        symbol.push_str(&self.from);
+        symbol.push_str(&self.to);
+        symbol
     }
 
     /// Returns the inverse pair (e.g., USD/EUR -> EUR/USD).
@@ -344,17 +562,10 @@ impl FromStr for CurrencyPair {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
 
-        if s.contains('/') {
-            let parts: Vec<&str> = s.split('/').collect();
-            if parts.len() != 2 {
-                return Err(DukascopyError::InvalidCurrencyCode {
-                    code: s.to_string(),
-                    reason: "Invalid pair format. Expected 'BASE/QUOTE'".to_string(),
-                });
-            }
-            Self::try_new(parts[0].trim(), parts[1].trim())
-        } else if s.len() == 6 {
+        if s.len() == 6 && !s.as_bytes().contains(&b'/') {
             Self::try_new(&s[0..3], &s[3..6])
+        } else if s.as_bytes().contains(&b'/') {
+            parse_pair_with_slash(s)
         } else {
             Err(DukascopyError::InvalidCurrencyCode {
                 code: s.to_string(),

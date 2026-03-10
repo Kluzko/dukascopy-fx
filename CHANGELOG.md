@@ -7,19 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Documentation
+## [0.5.1] - 2026-03-10
 
-- Changelog is the canonical release source; removed separate `RELEASE_NOTES.md` to avoid duplication.
+### Added
+
+- Client config knob: `parsed_tick_cache_size(...)` (`ClientConfig::parsed_tick_cache_size`) for independent parsed-tick cache budgeting.
+- Client config knob: `max_decompression_jobs(...)` (`ClientConfig::max_decompression_jobs`) to cap concurrent LZMA decompression jobs.
+- Alias-cycle regression coverage (`test_code_alias_cycle_returns_stable_value`).
 
 ### Changed
 
+- Request/pair hot paths optimized (`RateRequest` parsing and `CurrencyPair` internals now use `SmolStr` storage to reduce allocation pressure).
+- Cache-miss fetch path now uses singleflight deduplication for concurrent requests to the same URL.
+- Range/history path now reuses parsed hourly ticks from a dedicated parsed-tick LRU cache.
+- Cache internals switched to `parking_lot::Mutex` for lower lock overhead.
+- Changelog is now the canonical release source (separate `RELEASE_NOTES.md` removed).
 - MSRV raised from `1.76` to `1.83` (transitive dependency toolchain requirement).
 - CI hardened with least-privilege token permissions, workflow concurrency cancellation, job timeouts, lockfile-enforced Cargo commands, and faster supply-chain tool install via `taiki-e/install-action@v2`.
 - `cargo-deny` advisory exception added for `RUSTSEC-2025-0134` (`rustls-pemfile`) because it is transitive via `reqwest` and currently has no safe upgrade path.
 - `cargo-deny` advisory exception added for `RUSTSEC-2024-0436` (`paste`) because it is transitive via `parquet` and currently has no maintained replacement in this dependency chain.
+- `cargo-deny` advisory exception added for `RUSTSEC-2025-0057` (`fxhash`) because it is transitive via `scraper/selectors` and currently has no safe upgrade path.
 - Dependency refresh (`cargo update`) to latest compatible crate versions.
 - `env_logger` upgraded to `0.11` (removes deprecated `atty` dependency path).
-- `cargo-deny` advisory exception added for `RUSTSEC-2025-0057` (`fxhash`) because it is transitive via `scraper/selectors` and currently has no safe upgrade path.
+
+### Fixed
+
+- Singleflight waiters no longer risk hanging when the leader task is cancelled.
+- Singleflight waiters now receive the leader fetch result/error instead of stampeding on failure.
+- Public constructor compatibility preserved (`RateRequest::pair`, `CurrencyPair::new`, `CurrencyPair::try_new` keep `Into<String>` bounds in `0.5.x`).
+- `fx_fetcher export` pair validation path now avoids unnecessary string allocations.
+
+### Documentation
+
+- README updated with `0.5.1` quickstart version and release highlights.
+- `docs/BENCHMARKS.md` now links to load/stress guidance and explains when to use it.
 
 ## [0.5.0] - 2026-03-07
 
